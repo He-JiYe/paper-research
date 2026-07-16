@@ -1,0 +1,92 @@
+<!-- 共享 Fetch 模态框（keyword fetch + search） -->
+<div id="fetch-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;padding:40px;">
+    <div style="background:white;max-width:600px;margin:0 auto;border-radius:8px;padding:24px;">
+        <h3 style="margin:0 0 12px;">🔄 Arxiv 论文操作</h3>
+        <!-- Tabs -->
+        <div style="display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid #eee;">
+            <button id="ftab-keyword" class="ftab active" onclick="switchFetchTab('keyword')" style="flex:1;padding:8px;border:none;background:none;cursor:pointer;font-size:14px;font-weight:600;color:#667eea;border-bottom:2px solid #667eea;margin-bottom:-2px;">关键词抓取</button>
+            <button id="ftab-search" class="ftab" onclick="switchFetchTab('search')" style="flex:1;padding:8px;border:none;background:none;cursor:pointer;font-size:14px;color:#888;border-bottom:2px solid transparent;margin-bottom:-2px;">搜索论文</button>
+            <button id="ftab-keywords" class="ftab" onclick="switchFetchTab('keywords')" style="flex:1;padding:8px;border:none;background:none;cursor:pointer;font-size:14px;color:#888;border-bottom:2px solid transparent;margin-bottom:-2px;">关键词设置</button>
+        </div>
+        <!-- Tab: Keyword Fetch -->
+        <div id="fpanel-keyword">
+            <label style="font-size:13px;color:#555;">关键词（留空则使用配置）</label>
+            <input id="fetch-keyword" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;margin:4px 0 12px;font-size:14px;" placeholder="如: test-time adaptation">
+            <label style="font-size:13px;color:#555;">Arxiv 分类（可选）</label>
+            <div id="cat-checkboxes" style="margin:8px 0;display:flex;flex-wrap:wrap;gap:6px;">
+                <label><input type="checkbox" name="arxiv_cats" value="cs.AI"> cs.AI</label>
+                <label><input type="checkbox" name="arxiv_cats" value="cs.CL"> cs.CL</label>
+                <label><input type="checkbox" name="arxiv_cats" value="cs.CV"> cs.CV</label>
+                <label><input type="checkbox" name="arxiv_cats" value="cs.LG"> cs.LG</label>
+                <label><input type="checkbox" name="arxiv_cats" value="cs.NE"> cs.NE</label>
+                <label><input type="checkbox" name="arxiv_cats" value="cs.IR"> cs.IR</label>
+                <label><input type="checkbox" name="arxiv_cats" value="cs.SE"> cs.SE</label>
+                <label><input type="checkbox" name="arxiv_cats" value="cs.PL"> cs.PL</label>
+                <label><input type="checkbox" name="arxiv_cats" value="cs.CR"> cs.CR</label>
+                <label><input type="checkbox" name="arxiv_cats" value="stat.ML"> stat.ML</label>
+            </div>
+            <label style="font-size:13px;color:#555;">结果数量</label>
+            <input id="fetch-max" type="number" value="20" min="5" max="100" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;margin:4px 0 12px;font-size:14px;">
+            <div style="display:flex;gap:8px;">
+                <button onclick="doFetch()" style="flex:1;background:#667eea;color:white;border:none;padding:8px;border-radius:4px;cursor:pointer;font-size:14px;">开始抓取</button>
+                <button onclick="closeFetchModal()" style="background:#ecf0f1;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:14px;">关闭</button>
+            </div>
+            <div id="fetch-result" style="margin-top:12px;font-size:13px;color:#555;"></div>
+        </div>
+        <!-- Tab: Search -->
+        <div id="fpanel-search" style="display:none;">
+            <label style="font-size:13px;color:#555;">搜索词（支持 ti: / au: / all: 前缀）</label>
+            <div style="display:flex;gap:8px;margin:4px 0 12px;">
+                <input id="search-query" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:14px;" placeholder='如: ti:transformer 或 all:out-of-distribution'>
+                <button onclick="doSearch()" style="padding:8px 16px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;">搜索</button>
+            </div>
+            <div id="search-results" style="max-height:350px;overflow-y:auto;margin-bottom:12px;">
+                <div style="text-align:center;padding:20px;color:#999;font-size:14px;">输入搜索词后点击搜索</div>
+            </div>
+            <div style="display:flex;gap:8px;">
+                <button id="import-btn" onclick="doImport()" style="flex:1;background:#27ae60;color:white;border:none;padding:8px;border-radius:4px;cursor:pointer;font-size:14px;" disabled>导入选中 (0 篇)</button>
+                <button onclick="closeFetchModal()" style="background:#ecf0f1;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:14px;">关闭</button>
+            </div>
+            <div id="import-status" style="margin-top:12px;font-size:13px;color:#555;"></div>
+        </div>  <!-- close fpanel-search -->
+        <!-- Tab: Keyword Settings -->
+        <div id="fpanel-keywords" style="display:none;">
+            <div style="margin-bottom:12px;font-size:14px;font-weight:600;">关键词管理</div>
+            <div id="kw-list" style="max-height:200px;overflow-y:auto;margin-bottom:12px;border:1px solid #eee;border-radius:4px;padding:8px;">
+                <div style="text-align:center;padding:12px;color:#999;">切换到该标签加载...</div>
+            </div>
+            <!-- 增量抓取设置 -->
+            <div style="border:1px solid #eee;border-radius:4px;padding:12px;margin-bottom:12px;">
+                <div style="display:flex;gap:12px;">
+                    <div style="flex:1;">
+                        <label style="font-size:12px;color:#555;">每关键词目标新增数</label>
+                        <input id="kw-target-new" type="number" min="5" max="200" value="25"
+                               style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:14px;">
+                    </div>
+                    <div style="flex:1;">
+                        <label style="font-size:12px;color:#555;">历史回溯天数</label>
+                        <input id="kw-lookback-days" type="number" min="7" max="730" value="90"
+                               style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:14px;">
+                    </div>
+                </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:12px;">
+                <input id="kw-new-keyword" style="flex:2;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:14px;"
+                    placeholder="新关键词">
+                <input id="kw-new-cat" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:14px;"
+                    placeholder="arxiv分类 如 cs.CV,cs.LG">
+                <button onclick="addKeywordItem()"
+                    style="background:#667eea;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">添加</button>
+            </div>
+            <div style="display:flex;gap:8px;">
+                <button onclick="saveAllSettings()"
+                    style="flex:1;background:#27ae60;color:white;border:none;padding:8px;border-radius:4px;cursor:pointer;font-size:14px;">保存设置</button>
+                <button onclick="fetchByConfig()"
+                    style="flex:1;background:#667eea;color:white;border:none;padding:8px;border-radius:4px;cursor:pointer;font-size:14px;">按设置抓取</button>
+                <button onclick="closeFetchModal()"
+                    style="background:#ecf0f1;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">关闭</button>
+            </div>
+            <div id="kw-result" style="margin-top:12px;font-size:13px;color:#555;"></div>
+        </div>  <!-- close fpanel-keywords -->
+    </div>  <!-- close white-bg -->
+</div>  <!-- close fetch-modal -->

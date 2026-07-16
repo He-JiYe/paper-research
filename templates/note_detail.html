@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:#f5f6fa; color:#2c3e50; height:100vh; overflow:hidden; }
+        .app { display:flex; height:100vh; }
+        .pane { overflow-y:auto; }
+        .pane-left { flex:1; background:white; border-right:1px solid #e0e0e0; display:flex; flex-direction:column; }
+        .pane-left .pdf-bar { padding:12px 16px; background:#f8f9fa; border-bottom:1px solid #eee; display:flex; gap:8px; align-items:center; flex-shrink:0; }
+        .pane-left .pdf-bar a { padding:4px 14px; border-radius:6px; text-decoration:none; font-size:13px; background:#667eea; color:white; }
+        .pane-left .pdf-bar a:hover { opacity:0.9; }
+        .pane-left .pdf-placeholder { flex:1; display:flex; align-items:center; justify-content:center; color:#999; font-size:14px; flex-direction:column; gap:12px; }
+        .pane-left iframe { flex:1; width:100%; border:none; }
+        .pane-right { flex:1; background:white; display:flex; flex-direction:column; }
+        .toolbar { display:flex; gap:8px; padding:10px 16px; background:#f8f9fa; border-bottom:1px solid #eee; align-items:center; flex-shrink:0; flex-wrap:wrap; }
+        .toolbar a, .toolbar button { padding:4px 14px; border-radius:6px; text-decoration:none; font-size:13px; cursor:pointer; border:none; transition:all .2s; }
+        .tbtn { background:#ecf0f1; color:#555; }
+        .tbtn:hover { background:#dfe6e9; }
+        .tedit { background:#667eea; color:white; }
+        .tedit:hover { opacity:0.9; }
+        .note-body { padding:20px 32px; flex:1; overflow-y:auto; line-height:1.8; max-width:800px; }
+        .note-body h1 { font-size:22px; margin-bottom:16px; }
+        .note-body h2 { font-size:18px; margin:20px 0 10px; padding-bottom:6px; border-bottom:1px solid #eee; }
+        .note-body p { margin:8px 0; font-size:15px; }
+        .note-body ul { margin:8px 0 8px 20px; }
+        .note-body img { max-width:100%; margin:12px 0; border-radius:6px; border:1px solid #eee; }
+        .tag { display:inline-block; background:#e8f4fd; color:#2980b9; padding:2px 10px; border-radius:12px; font-size:12px; }
+        #note-editor { display:none; width:100%; flex:1; font-family:monospace; font-size:14px; padding:16px; border:none; resize:none; outline:none; }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <!-- 左栏: PDF -->
+        <div class="pane pane-left">
+            <div class="pdf-bar">
+                {% if mark_badge %}
+                <span class="tag">{{ mark_badge }}</span>
+                {% endif %}
+                {% if short_title %}
+                <strong>{{ short_title }}</strong>
+                {% endif %}
+                <span style="flex:1"></span>
+                <a href="https://arxiv.org/pdf/{{ arxiv_id }}" target="_blank">📄 PDF</a>
+                <a href="https://arxiv.org/abs/{{ arxiv_id }}" target="_blank">🔗 Arxiv</a>
+            </div>
+            {% if short_desc %}
+            <div style="padding:10px 16px;background:#fef9e7;border-bottom:1px solid #f9e79f;font-size:13px;color:#7d6608;">
+                {{ short_desc }}
+            </div>
+            {% endif %}
+            <iframe src="/api/pdf/{{ arxiv_id }}" style="width:100%;flex:1;border:none;" title="PDF"></iframe>
+            <div class="pdf-placeholder" style="display:none;">
+                <div>📄 PDF Preview</div>
+                <a href="/api/pdf/{{ arxiv_id }}" target="_blank" style="color:#667eea;">查看 PDF（代理）</a>
+            </div>
+        </div>
+
+        <!-- 右栏: 笔记 -->
+        <div class="pane pane-right">
+            <div class="toolbar">
+                <button class="tbtn" onclick="toggleEdit()" id="edit-btn">✏️ 编辑</button>
+                <button class="tedit" onclick="saveNote()" id="save-btn" style="display:none;">💾 保存</button>
+                <a href="/notes" class="tbtn">📚 返回画廊</a>
+                <span style="flex:1"></span>
+                <button class="tbtn" onclick="showShortInfoEditor()" id="short-info-btn">🏷️ 编辑短信息</button>
+                <span id="save-status" style="font-size:13px;color:#27ae60;"></span>
+            </div>
+            <div class="note-body" id="note-body">{{ body_html|safe }}</div>
+            <textarea id="note-editor"></textarea>
+        </div>
+    </div>
+
+    <!-- 短信息编辑模态框 -->
+    <div id="shortinfo-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;padding:80px 40px;">
+        <div style="background:white;max-width:500px;margin:0 auto;border-radius:8px;padding:24px;">
+            <h3 style="margin:0 0 12px;">编辑短信息</h3>
+            <label style="font-size:13px;color:#555;">短标题（如 "2024-Transformer"）</label>
+            <input id="si-title" value="{{ short_title }}" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;margin:4px 0 12px;font-size:14px;">
+            <label style="font-size:13px;color:#555;">简要说明</label>
+            <textarea id="si-desc" rows="3" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;margin:4px 0 12px;font-size:14px;resize:vertical;">{{ short_desc }}</textarea>
+            <div style="display:flex;gap:8px;">
+                <button onclick="saveShortInfo()" style="flex:1;background:#667eea;color:white;border:none;padding:8px;border-radius:4px;cursor:pointer;font-size:14px;">保存</button>
+                <button onclick="closeShortInfoEditor()" style="background:#ecf0f1;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:14px;">取消</button>
+            </div>
+            <div id="si-status" style="margin-top:12px;font-size:13px;color:#555;"></div>
+        </div>
+    </div>
+
+    <script>
+        let isEditing = false;
+        async function loadNoteContent() {
+            const res = await fetch('/api/note/{{ arxiv_id }}');
+            if (res.ok) {
+                const text = await res.text();
+                document.getElementById('note-editor').value = text;
+            }
+        }
+        function toggleEdit() {
+            isEditing = !isEditing;
+            document.getElementById('note-body').style.display = isEditing ? 'none' : 'block';
+            document.getElementById('note-editor').style.display = isEditing ? 'block' : 'none';
+            document.getElementById('edit-btn').textContent = isEditing ? '📖 预览' : '✏️ 编辑';
+            document.getElementById('save-btn').style.display = isEditing ? 'inline-block' : 'none';
+            if (isEditing) loadNoteContent();
+        }
+        async function saveNote() {
+            const content = document.getElementById('note-editor').value;
+            const statusEl = document.getElementById('save-status');
+            statusEl.textContent = 'Saving...';
+            try {
+                const res = await fetch('/api/note/{{ arxiv_id }}', {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'text/plain'},
+                    body: content,
+                });
+                if (res.ok) {
+                    statusEl.textContent = 'Saved!';
+                    setTimeout(() => { statusEl.textContent = ''; location.reload(); }, 800);
+                } else { statusEl.textContent = 'Save failed!'; }
+            } catch(e) { statusEl.textContent = 'Error!'; }
+        }
+
+        /* ─── Short Info ─── */
+        function showShortInfoEditor() { document.getElementById('shortinfo-modal').style.display = ''; }
+        function closeShortInfoEditor() { document.getElementById('shortinfo-modal').style.display = 'none'; }
+        async function saveShortInfo() {
+            const title = document.getElementById('si-title').value;
+            const desc = document.getElementById('si-desc').value;
+            const statusEl = document.getElementById('si-status');
+            statusEl.textContent = 'Saving...';
+            try {
+                const params = new URLSearchParams();
+                params.append('short_title', title);
+                params.append('description', desc);
+                const res = await fetch('/api/note/{{ arxiv_id }}/short_info', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: params.toString(),
+                });
+                if (res.ok) { statusEl.textContent = 'Saved!'; setTimeout(() => location.reload(), 800); }
+                else { statusEl.textContent = 'Failed!'; }
+            } catch(e) { statusEl.textContent = 'Error!'; }
+        }
+
+        /* Keyboard shortcut */
+        document.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                if (isEditing) saveNote();
+            }
+        });
+    </script>
+</body>
+</html>

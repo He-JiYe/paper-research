@@ -1,0 +1,54 @@
+[
+  {
+    "keyword": "test-time adaptation",
+    "arxiv_cats": [
+      "cs.CV",
+      "cs.LG"
+    ],
+    "active": true
+  },
+  {
+    "keyword": "out-of-distribution detection",
+    "arxiv_cats": [
+      "cs.LG"
+    ],
+    "active": true
+  },
+  {
+    "keyword": "domain generalization",
+    "arxiv_cats": [
+      "cs.CV",
+      "cs.LG"
+    ],
+    "active": false
+  },
+  {
+    "keyword": "self-supervised learning",
+    "arxiv_cats": [
+      "cs.LG",
+      "cs.CV"
+    ],
+    "active": false
+  },
+  {
+    "keyword": "unsupervised domain adaptation",
+    "arxiv_cats": [
+      "cs.CV",
+      "cs.LG"
+    ],
+    "active": false
+  },
+  {
+    "keyword": "semi-supervised learning",
+    "arxiv_cats": [
+      "cs.LG",
+      "cs.CV"
+    ],
+    "active": false
+  },
+  {
+    "keyword": "RL",
+    "arxiv_cat": "cs.LG",
+    "active": true
+  }
+]

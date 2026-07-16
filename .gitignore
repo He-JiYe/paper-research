@@ -1,0 +1,71 @@
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+*.tar.gz
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*,cover      # coverage artifacts with odd naming
+*.cover
+coverage/
+
+# ── Virtual environment ──────────────────────────────
+.venv/
+venv/
+env/
+.uv/
+
+# ── Project runtime data ─────────────────────────────
+data/
+output/
+*.db
+*.db-shm
+*.db-wal
+fetch_status.json
+
+# ── Sensitive configuration ─────────────────────────
+config/settings.json
+
+# ── Orphan files from old structure (moved to subdirectories) ─
+# src/renderer.py -> src/serve/renderer.py
+# src/server.py -> src/serve/server.py
+# src/network.py -> src/network/arxiv.py
+/src/renderer.py
+/src/server.py
+/src/network.py
+/src/setup_task.ps1
+
+# ── IDE & Editor ────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.iml
+.vs/
+*.suo
+*.user
+
+# ── OS ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ── Claude Code ─────────────────────────────────────
+.claude/settings.local.json
+.claude/worktrees/
+.claude/plans/
+
+# ── Misc ────────────────────────────────────────────
+TODO.md
+PLAN.md
+# setup_task.ps1

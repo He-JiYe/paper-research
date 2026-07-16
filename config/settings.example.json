@@ -1,0 +1,36 @@
+{
+    "llm": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "api_base": "https://api.deepseek.com",
+        "api_key": "YOUR_DEEPSEEK_API_KEY_HERE",
+        "temperature": 0.3,
+        "max_tokens": 5000
+    },
+    "arxiv": {
+        "delay_between_requests": 1.0,
+        "max_concurrent_requests": 5,
+        "lookback_days": 90,
+        "target_new_per_keyword": 25,
+        "user_agent": "PaperResearch/1.0 (+https://github.com/23087/paper-research; mailto:user@example.com)"
+    },
+    "server": {
+        "host": "127.0.0.1",
+        "port": 8899
+    },
+    "notification": {
+        "windows_toast": true,
+        "email": {
+            "enabled": false,
+            "smtp_host": "",
+            "smtp_port": 465,
+            "username": "",
+            "password": "",
+            "from": "",
+            "to": ""
+        }
+    },
+    "scoring": {
+        "min_relevance_score": 0.3
+    }
+}

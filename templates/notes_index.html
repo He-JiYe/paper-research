@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>论文笔记画廊 — Paper Research</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📚 论文笔记画廊</h1>
+            <div class="sub">
+                共 {{ total }} 篇笔记 — 🔬 精读 {{ deep_read_count }} 篇, 📖 粗读 {{ skim_count }} 篇, ⏳ 延后 {{ lurk_count }} 篇, 🗑️ 忽略 {{ ignore_count }} 篇, ⏳ 待处理 {{ pending_count }} 篇
+                &nbsp;|&nbsp; <a href="/" class="action-btn">📄 摘要页</a>
+                <button onclick="showFetchModal()" class="action-btn" style="margin-left:8px;">🔄 抓取</button>
+                <button onclick="doRefresh()" class="action-btn">🔃 刷新</button>
+            </div>
+        </div>
+
+        <div class="filters">
+            <button class="filter-btn active" onclick="filterBy('all', '', this)">全部</button>
+            <button class="filter-btn" onclick="filterBy('mark', 'deep_read', this)">🔬 精读</button>
+            <button class="filter-btn" onclick="filterBy('mark', 'skim', this)">📖 粗读</button>
+            <button class="filter-btn" onclick="filterBy('mark', 'lurk', this)">⏳ 延后</button>
+            <button class="filter-btn" onclick="filterBy('mark', 'ignore', this)">🗑️ 忽略</button>
+            <button class="filter-btn" onclick="filterBy('mark', 'pending', this)">⏳ 待审核</button>
+            {% for c in categories_list %}
+            <button class="filter-btn" onclick="filterBy('category', '{{ c["id"] }}', this)">{{ c["name"] }}</button>
+            {% endfor %}
+            <span style="flex:1"></span>
+            <button class="action-btn" onclick="showCategoryManager()">管理分类</button>
+        </div>
+
+        {% include "_fetch_modal.html" %}
+
+        <div class="view-toggle">
+        <button class="view-btn active" onclick="switchNotesView('list')" id="view-list">📋 列表</button>
+        <button class="view-btn" onclick="switchNotesView('grid')" id="view-grid">🔂 卡片</button>
+    </div>
+
+    <div class="notes-container" id="notes-container">
+            {% if note_papers %}
+            {% for p in note_papers %}
+            <div class="note-card" data-mark="{{ p.user_mark or 'pending' }}" data-remark="{{ p.remark }}"
+                 data-category-ids="{{ p.cat_ids|join(',') }}" data-arxiv-id="{{ p.arxiv_id }}">
+                {% if p.thumb_name %}
+                <a href="/notes/{{ p.arxiv_id }}">
+                    <img src="/notes/{{ p.arxiv_id }}/figures/{{ p.thumb_name }}" class="note-thumb" alt="thumb">
+                </a>
+                {% endif %}
+                <div class="note-info">
+                    <h3>
+                        <a href="{{ p.url }}" target="_blank">[{{ p.arxiv_id }}]</a>
+                        {% if p.short_title %}
+                        <span class="short-title" style="color:#e67e22;font-size:14px;">{{ p.short_title }}</span>
+                        {% endif %}
+                        <span class="full-title" style="font-size:13px;color:#999;font-weight:normal;">{{ p.title }}</span>
+                    </h3>
+                    {% if p.short_desc %}
+                    <div style="font-size:13px;color:#888;margin:2px 0 6px;line-height:1.4;">{{ p.short_desc }}</div>
+                    {% endif %}
+                    <div class="note-meta">
+                        {% set mark_raw = p.user_mark or "pending" %}
+                        {% set badge_cls = mark_raw.replace("_", "-") %}
+                        <span class="note-badge badge-{{ badge_cls }}">
+                            {%- if p.user_mark == "skim" %}📖 粗读
+                            {%- elif p.user_mark == "deep_read" %}🔬 精读
+                            {%- elif p.user_mark == "lurk" %}⏳ 延后
+                            {%- elif p.user_mark == "ignore" %}🗑️ 忽略
+                            {%- else %}⏳ 待审核{% endif -%}
+                        </span>
+                        <span class="note-remark">{{ REMARK_LABELS.get(p.remark, p.remark) }}</span>
+                        <span class="meta-extra">Score: {{ "%.2f"|format(p.score) }}</span>
+                        <span class="meta-extra">{{ p.published }}</span>
+                        <span class="meta-extra">{{ p.authors }}</span>
+                    </div>
+                    <div class="note-actions">
+                        <a href="/notes/{{ p.arxiv_id }}">📝 查看笔记</a>
+                        <a href="https://arxiv.org/pdf/{{ p.arxiv_id }}">📄 PDF</a>
+                        <a href="{{ p.url }}">🔗 Arxiv</a>
+                    </div>
+                    <div class="mark-buttons" style="margin-top:8px;">
+                        <button class="btn-mark btn-ignore" onclick="markPaper('{{ p.arxiv_id }}','ignore')" {% if p.user_mark == 'ignore' %}disabled{% endif %}>🗑️ 忽略</button>
+                        <button class="btn-mark btn-lurk" onclick="markPaper('{{ p.arxiv_id }}','lurk')" {% if p.user_mark == 'lurk' %}disabled{% endif %}>⏳ 延后</button>
+                        <button class="btn-mark btn-pending" onclick="markPaper('{{ p.arxiv_id }}','pending')" {% if not p.user_mark %}disabled{% endif %}>⏳ 待审核</button>
+                        <span class="mark-result" id="gresult-{{ p.arxiv_id }}" style="font-size:13px;color:var(--success);"></span>
+                    </div>
+                    {% if categories_list %}
+                    <div class="note-categories" style="margin-top:8px;">
+                        <div style="font-size:12px;color:#888;margin-bottom:4px;">分类（多选）:</div>
+                        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                            {% for c in categories_list %}
+                            <label style="font-size:13px;cursor:pointer;">
+                                <input type="checkbox" value="{{ c["id"] }}"
+                                    {% if c["id"] in p.cat_ids %}checked{% endif %}
+                                    onchange="setNoteCategoryDebounced('{{ p.arxiv_id }}')">
+                                {{ c["name"] }}
+                            </label>
+                            {% endfor %}
+                        </div>
+                        <div id="cat-status-{{ p.arxiv_id }}" style="font-size:11px;color:#27ae60;margin-top:4px;"></div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="empty-state"><p>暂无阅读笔记,将论文标记为粗读或精读后会自动生成笔记</p></div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- 分类管理模态框 -->
+    <div id="cat-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;padding:40px;">
+        <div style="background:white;max-width:500px;margin:0 auto;border-radius:8px;padding:24px;">
+            <h3 style="margin:0 0 12px;">管理自定义分类</h3>
+            <div id="cat-list" style="margin-bottom:16px;"></div>
+            <div style="display:flex;gap:8px;margin-bottom:16px;">
+                <input id="new-cat-name" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:14px;" placeholder="新分类名称">
+                <button onclick="addCategory()" class="action-btn">添加</button>
+            </div>
+            <button onclick="closeCatManager()" style="background:#ecf0f1;border:none;padding:8px;border-radius:4px;cursor:pointer;width:100%;">关闭</button>
+            <div id="cat-result" style="margin-top:12px;font-size:13px;color:#555;"></div>
+        </div>
+    </div>
+
+    <script>
+        function showFetchModal() { document.getElementById('fetch-modal').style.display = ''; }
+        function closeFetchModal() { document.getElementById('fetch-modal').style.display = 'none'; }
+
+        /* ─── SSE: 等待后台抓取结果 ─── */
+        function waitFetchResult(callback) {
+            var evtSource = new EventSource('/api/fetch-status-stream');
+            evtSource.onmessage = function(event) {
+                evtSource.close();
+                callback(JSON.parse(event.data));
+            };
+            evtSource.onerror = function() {
+                evtSource.close();
+            };
+        }
+
+        async function doFetch() {
+            const kw = document.getElementById('fetch-keyword').value;
+            const checks = document.querySelectorAll('#cat-checkboxes input[type=checkbox]:checked');
+            const cats = Array.from(checks).map(c => c.value).join(',');
+            const max = document.getElementById('fetch-max').value;
+            const el = document.getElementById('fetch-result');
+            el.textContent = 'Fetching...';
+            try {
+                const params = new URLSearchParams();
+                if (kw) params.append('keyword', kw);
+                if (cats) params.append('arxiv_cats', cats);
+                params.append('max_results', max);
+                el.textContent = 'Fetch started, waiting...';
+                waitFetchResult(function(st) {
+                    alert('Fetch complete! ' + st.fetched + ' papers, ' + st.new + ' new.');
+                    location.reload();
+                });
+                const res = await fetch('/api/fetch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: params.toString(),
+                });
+                if (!res.ok) { el.textContent = 'Fetch failed!'; }
+            } catch(e) { el.textContent = 'Error: ' + e.message; }
+        }
+
+        async function doRefresh() {
+            await fetch('/api/refresh', {method: 'POST'});
+            location.reload();
+        }
+
+        /* ─── Mark API ─── */
+        async function markPaper(arxivId, markType) {
+            const resultEl = document.getElementById('gresult-' + arxivId);
+            if (resultEl) resultEl.textContent = '标记中...';
+            try {
+                const params = new URLSearchParams();
+                params.append('arxiv_id', arxivId);
+                params.append('mark_type', markType);
+                const res = await fetch('/mark', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: params.toString(),
+                });
+                if (res.ok) { setTimeout(() => location.reload(), 800); }
+                else { if (resultEl) { resultEl.textContent = '标记失败'; resultEl.style.color = '#e74c3c'; } }
+            } catch(e) { if (resultEl) { resultEl.textContent = '网络错误'; resultEl.style.color = '#e74c3c'; } }
+        }
+
+        /* ─── Search & Import ─── */
+        function switchFetchTab(tab) {
+            ['keyword','search','keywords'].forEach(t => {
+                const btn = document.getElementById('ftab-'+t);
+                btn.style.color = t === tab ? '#667eea' : '#888';
+                btn.style.borderBottom = t === tab ? '2px solid #667eea' : '2px solid transparent';
+                btn.style.fontWeight = t === tab ? '600' : '400';
+                btn.classList.toggle('active', t === tab);
+            });
+            document.getElementById('fpanel-keyword').style.display = tab === 'keyword' ? '' : 'none';
+            document.getElementById('fpanel-search').style.display = tab === 'search' ? '' : 'none';
+            const kwPanel = document.getElementById('fpanel-keywords');
+            if (kwPanel) kwPanel.style.display = tab === 'keywords' ? '' : 'none';
+            if (tab === 'keywords') { loadKeywords(); loadSettings(); }
+        }
+        let _searchResults = [];
+        async function doSearch() {
+            const q = document.getElementById('search-query').value.trim();
+            if (!q) return;
+            const el = document.getElementById('search-results');
+            el.innerHTML = '<div style="text-align:center;padding:20px;color:#999;">搜索中...</div>';
+            try {
+                const res = await fetch('/api/search?q='+encodeURIComponent(q)+'&max=20');
+                const data = await res.json();
+                _searchResults = data.papers || [];
+                if (!_searchResults.length) {
+                    el.innerHTML = '<div style="text-align:center;padding:20px;color:#999;">未找到相关论文</div>';
+                    const impBtn = document.getElementById('import-btn'); if (impBtn) impBtn.disabled = true;
+                    document.getElementById('import-btn').textContent = '导入选中 (0 篇)';
+                    return;
+                }
+                let html = '<div style="margin-bottom:8px;"><label style="font-size:13px;cursor:pointer;"><input type="checkbox" onchange="toggleSelectAll(this)"> 全选</label></div>';
+                _searchResults.forEach((p, i) => {
+                    const aid = p.arxiv_id || '';
+                    const title = p.title || '';
+                    const authors = (p.authors || '').slice(0, 60);
+                    const pub = p.published || '';
+                    const abst = (p.abstract || '').slice(0, 300);
+                    html += '<div style="padding:8px;border:1px solid #eee;border-radius:4px;margin-bottom:6px;">';
+                    html += '<label style="cursor:pointer;display:flex;gap:8px;align-items:flex-start;">';
+                    html += '<input type="checkbox" class="spaper" value="'+aid+'" onchange="updateImportBtn()" style="margin-top:3px;">';
+                    html += '<div style="flex:1;font-size:13px;">';
+                    html += '<strong>['+aid+']</strong> ' + title.slice(0, 100);
+                    html += '<div style="color:#888;font-size:12px;">'+authors+' | '+pub+'</div>';
+                    html += '<details style="font-size:12px;color:#666;margin-top:2px;"><summary>摘要</summary>'+abst+'</details>';
+                    html += '</div></label></div>';
+                });
+                el.innerHTML = html;
+                document.getElementById('import-btn').disabled = false;
+                updateImportBtn();
+            } catch(e) { el.innerHTML = '<div style="text-align:center;padding:20px;color:#e74c3c;">搜索失败: '+e.message+'</div>'; }
+        }
+        function toggleSelectAll(el) { document.querySelectorAll('.spaper').forEach(c => c.checked = el.checked); updateImportBtn(); }
+        function updateImportBtn() {
+            const n = document.querySelectorAll('.spaper:checked').length;
+            const btn = document.getElementById('import-btn'); if (!btn) return;
+            btn.disabled = n === 0;
+            btn.textContent = '导入选中 ('+n+' 篇)';
+        }
+        async function doImport() {
+            const checked = document.querySelectorAll('.spaper:checked');
+            const ids = Array.from(checked).map(c => c.value);
+            if (!ids.length) return;
+            const btn = document.getElementById('import-btn'); if (!btn) return;
+            const statusEl = document.getElementById('import-status');
+            if (btn) btn.disabled = true;
+            statusEl.textContent = '正在导入 '+ids.length+' 篇...';
+            try {
+                const res = await fetch('/api/import-papers', {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ids: ids})
+                });
+                if (res.ok) {
+                    waitFetchResult(function(st) {
+                        alert('导入完成! ' + st.fetched + ' 篇, 新增 ' + st.new + ' 篇.');
+                        location.href = '/notes';
+                    });
+                } else { statusEl.textContent = '导入失败!'; btn.disabled = false; }
+            } catch(e) { statusEl.textContent = '错误: ' + e.message; btn.disabled = false; }
+        }
+
+        /* ─── Category / Filter ─── */
+        const catSaveTimers = {};
+        function filterBy(type, value, el) {
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            (el || event.target).classList.add('active');
+            document.querySelectorAll('.note-card').forEach(card => {
+                if (type === 'all') { card.style.display = ''; }
+                else if (type === 'category') {
+                    const cats = (card.getAttribute('data-category-ids') || '').split(',').filter(Boolean);
+                    card.style.display = cats.includes(value) ? '' : 'none';
+                } else {
+                    card.style.display = card.getAttribute('data-' + type) === value ? '' : 'none';
+                }
+            });
+        }
+        function setNoteCategoryDebounced(aid) {
+            if (catSaveTimers[aid]) clearTimeout(catSaveTimers[aid]);
+            catSaveTimers[aid] = setTimeout(() => setNoteCategory(aid), 300);
+        }
+        async function setNoteCategory(aid) {
+            const card = document.querySelector('[data-arxiv-id="' + aid + '"]');
+            if (!card) return;
+            const checks = card.querySelectorAll('input[type=checkbox]:checked');
+            const ids = Array.from(checks).map(c => c.value).join(',');
+            const statusEl = document.getElementById('cat-status-' + aid);
+            if (statusEl) statusEl.textContent = 'Saving...';
+            try {
+                const res = await fetch('/api/note/' + aid + '/categories', {method:'POST', headers:{'Content-Type':'text/plain'}, body:ids});
+                if (res.ok) {
+                    card.setAttribute('data-category-ids', ids);
+                    if (statusEl) { statusEl.textContent = 'Saved!'; setTimeout(() => { statusEl.textContent = ''; }, 2000); }
+                } else { if (statusEl) statusEl.textContent = 'Failed!'; }
+            } catch(e) { if (statusEl) statusEl.textContent = 'Error!'; }
+        }
+        var _keywords = [];
+        async function loadKeywords() {
+            try { const res = await fetch('/api/keywords'); _keywords = await res.json(); renderKeywords(); }
+            catch(e) { const el = document.getElementById('kw-list'); if (el) el.innerHTML = '<div style="text-align:center;padding:12px;color:#e74c3c;">加载失败</div>'; }
+        }
+        function renderKeywords() {
+            const el = document.getElementById('kw-list'); if (!el) return;
+            if (!_keywords.length) { el.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">暂无关键词</div>'; return; }
+            let h = '';
+            _keywords.forEach(function(kw, i) {
+                var catDisplay = kw.arxiv_cats ? kw.arxiv_cats.join(', ') : (kw.arxiv_cat || '');
+                h += '<div style="display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid #eee;">';
+                h += '<input type="checkbox" ' + (kw.active !== false ? 'checked' : '') + ' onchange="_keywords[' + i + '].active=this.checked" style="margin:0;">';
+                h += '<span style="flex:2;font-size:14px;font-weight:600;">' + (kw.keyword || '') + '</span>';
+                h += '<span style="flex:1;font-size:12px;color:#888;">' + catDisplay + '</span>';
+                h += '<button onclick="_keywords.splice(' + i + ',1);renderKeywords();" style="color:#e74c3c;background:none;border:none;cursor:pointer;font-size:18px;">x</button></div>';
+            });
+            el.innerHTML = h;
+        }
+        function addKeywordItem() {
+            const kw = document.getElementById('kw-new-keyword');
+            const cat = document.getElementById('kw-new-cat');
+            if (!kw || !kw.value.trim()) return;
+            var rawCats = cat ? cat.value.trim() : '';
+            var catsList = rawCats ? rawCats.split(',').map(function(s){return s.trim();}).filter(function(s){return s;}) : ['cs.CV'];
+            _keywords.push({keyword: kw.value.trim(), arxiv_cats: catsList, active: true});
+            kw.value = ''; if (cat) cat.value = ''; renderKeywords();
+        }
+        async function saveKeywords() {
+            const el = document.getElementById('kw-result'); if (!el) return;
+            el.textContent = '保存中...';
+            try {
+                const res = await fetch('/api/keywords', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_keywords)});
+                el.textContent = res.ok ? '保存成功!' : '保存失败'; el.style.color = res.ok ? '#27ae60' : '#e74c3c';
+            } catch(e) { el.textContent = '错误: ' + e.message; el.style.color = '#e74c3c'; }
+        }
+        async function fetchByConfig() {
+            const el = document.getElementById('kw-result'); if (!el) return;
+            el.textContent = '正在按配置抓取...';
+            try {
+                const res = await fetch('/api/fetch', {method:'POST'});
+                if (!res.ok) { el.textContent = '启动抓取失败'; return; }
+                el.textContent = '抓取已启动...';
+                waitFetchResult(function(st) {
+                    alert('抓取完成! ' + st.fetched + ' 篇, ' + st.new + ' 篇新增.');
+                    location.href = '/notes';
+                });
+            } catch(e) { el.textContent = '错误: ' + e.message; }
+        }
+
+        /* ─── Settings API: 读取/保存 arxiv 设置 ─── */
+        async function loadSettings() {
+            try {
+                var res = await fetch('/api/settings');
+                var data = await res.json();
+                var targetEl = document.getElementById('kw-target-new');
+                var lbEl = document.getElementById('kw-lookback-days');
+                if (targetEl && data.target_new_per_keyword) targetEl.value = data.target_new_per_keyword;
+                if (lbEl && data.lookback_days) lbEl.value = data.lookback_days;
+            } catch(e) { console.warn('loadSettings failed:', e); }
+        }
+        async function saveAllSettings() {
+            var el = document.getElementById('kw-result');
+            if (!el) return;
+            el.textContent = '保存中...';
+            /* 先保存关键词 */
+            try {
+                var kwRes = await fetch('/api/keywords', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_keywords)});
+                if (!kwRes.ok) { el.textContent = '关键词保存失败'; el.style.color = '#e74c3c'; return; }
+            } catch(e) { el.textContent = '关键词保存错误: ' + e.message; el.style.color = '#e74c3c'; return; }
+            /* 再保存 arxiv 设置 */
+            try {
+                var targetVal = parseInt(document.getElementById('kw-target-new').value) || 25;
+                var lbVal = parseInt(document.getElementById('kw-lookback-days').value) || 90;
+                var setRes = await fetch('/api/settings', {
+                    method:'PUT',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({target_new_per_keyword: targetVal, lookback_days: lbVal})
+                });
+                el.textContent = setRes.ok ? '保存成功!' : '设置保存失败';
+                el.style.color = setRes.ok ? '#27ae60' : '#e74c3c';
+            } catch(e) { el.textContent = '设置保存错误: ' + e.message; el.style.color = '#e74c3c'; }
+        }
+async function showCategoryManager() {
+            document.getElementById('cat-modal').style.display = '';
+            const el = document.getElementById('cat-list');
+            const res = await fetch('/api/categories');
+            const cats = await res.json();
+            el.innerHTML = cats.map(c =>
+                '<div style="padding:8px 0;border-bottom:1px solid #eee;display:flex;justify-content:space-between;"><span>'+c.name+'</span><button onclick="deleteCategory('+c.id+')" style="color:#e74c3c;background:none;border:none;cursor:pointer;">Delete</button></div>'
+            ).join('');
+        }
+        async function addCategory() {
+            const name = document.getElementById('new-cat-name').value.trim();
+            if(!name) return;
+            await fetch('/api/categories', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'name='+encodeURIComponent(name)});
+            document.getElementById('new-cat-name').value = '';
+            showCategoryManager();
+        }
+        async function deleteCategory(id) {
+            if(!confirm('确定删除?')) return;
+            await fetch('/api/categories/'+id, {method:'DELETE'});
+            showCategoryManager(); location.reload();
+        }
+        function closeCatManager() { document.getElementById('cat-modal').style.display = 'none'; }
+    </script>
+    <script>
+    function switchNotesView(mode) {
+        document.getElementById('view-list').classList.toggle('active', mode === 'list');
+        document.getElementById('view-grid').classList.toggle('active', mode === 'grid');
+        document.getElementById('notes-container').classList.toggle('grid-view', mode === 'grid');
+        localStorage.setItem('notes-view', mode);
+    }
+    /* 页面加载时恢复之前保存的视图 */
+    (function() {
+        var saved = localStorage.getItem('notes-view');
+        if (saved === 'grid') switchNotesView('grid');
+    })();
+    </script>
+</body>
+</html>

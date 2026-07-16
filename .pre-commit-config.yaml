@@ -1,0 +1,55 @@
+# pre-commit 配置文件
+# 安装: uv run pre-commit install
+# 手动运行所有钩子: uv run pre-commit run --all-files
+# 更新钩子版本: uv run pre-commit autoupdate
+
+repos:
+  # ── Ruff: Python 代码检查 + 自动修复 ──────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.21
+    hooks:
+      - id: ruff
+        name: ruff-lint
+        alias: ruff
+        description: "Run Ruff linter and auto-fix"
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff-format
+        description: "Run Ruff formatter"
+        types_or: [python, pyi]
+
+  # ── 通用钩子 ─────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        name: trim-trailing-whitespace
+        description: "去除行尾多余空白"
+      - id: end-of-file-fixer
+        name: ensure-eof-newline
+        description: "确保文件末尾有换行"
+      - id: check-yaml
+        name: check-yaml
+        description: "检查 YAML 格式"
+      - id: check-toml
+        name: check-toml
+        description: "检查 TOML 格式"
+      - id: check-added-large-files
+        name: check-large-files
+        description: "检查是否添加了大文件"
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+        name: check-merge-conflict
+        description: "检查是否遗留了合并冲突标记"
+      - id: detect-private-key
+        name: detect-private-key
+        description: "检测是否意外提交了私钥"
+
+  # ── 同步 pyproject.toml 与 uv.lock ────────────────
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.6.16
+    hooks:
+      - id: uv-lock
+        name: uv-lock
+        description: "保持 uv.lock 与 pyproject.toml 同步"

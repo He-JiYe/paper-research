@@ -1,0 +1,135 @@
+[project]
+name = "paper-research"
+version = "0.2.0"
+description = "论文自动调研工具：定时抓取 Arxiv，LLM 摘要，交互式审阅"
+authors = [{ name = "M.Wu", email = "2308769711@qq.com" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["arxiv", "paper", "research", "auto-interview"]
+
+dependencies = [
+    "httpx>=0.27.0",
+    "openai>=1.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "jinja2>=3.1.0",
+    "pymupdf>=1.24.0",
+    "python-multipart>=0.0.32",
+    "pandas>=3.0.3",
+    "tabulate>=0.10.0",
+]
+
+[project.optional-dependencies]
+windows = ["win11toast>=0.36.3"]
+dev = [
+    "ruff>=0.15.0",
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.4.0",
+    "pytest-mock>=3.15.0",
+    "pytest-cov>=7.0.0",
+    "pre-commit>=4.0.0",
+]
+
+[project.scripts]
+paper-research = "src.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle 错误
+    "W",    # pycodestyle 警告
+    "F",    # pyflakes 逻辑错误
+    "I",    # isort 导入排序
+    "N",    # pep8-naming 命名规范
+    "UP",   # pyupgrade 版本升级
+    "RUF",  # ruff 专属规则
+    "B",    # flake8-bugbear 潜在 bug
+    "SIM",  # flake8-simplify 简化建议
+    "C4",   # flake8-comprehensions 推导式优化
+    "T20",  # flake8-print 检查 print
+    "PT",   # flake8-pytest-style 测试风格
+]
+
+ignore = [
+    "E501",  # 行长度由 ruff 格式化处理，不在此检查
+    "N818",  # 允许自定义异常不以 Error 结尾
+    "SIM108", # 允许 if-else 而非三元表达式
+    "T201",  # 允许 print（CLI 工具需要）
+    "RUF001", # 允许中文全角字符（项目使用中文文档字符串）
+    "RUF002", # 允许中文全角标点
+    "RUF003", # 允许中英文混排注释
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]   # __init__.py 中未使用的导入是故意的
+"tests/**" = [
+    "T201",    # 测试中可以使用 print
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",  # 测试不需要文档字符串
+    "S101",    # 测试需要 assert
+    "B011",    # 允许 assert False
+    "PLR2004", # 允许魔法数字
+    "ANN",     # 测试不需要类型注解
+    "FBT",     # 测试中 bool 参数没问题
+    "N806",    # 允许 MockClassName 命名风格
+    "SIM117",  # 允许嵌套 with 以保持可读性
+]
+"src/serve/server.py" = ["RUF006"]  # asyncio.create_task 返回值可选
+"src/commands.py" = ["N806"]  # W/S/L 为布局常量，大写保持可读性
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+addopts = "--tb=short -q --strict-markers"
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "slow: 需要网络或 LLM 调用的慢速测试",
+    "network: 需要网络连接的测试",
+    "integration: 需要外部依赖的集成测试",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+omit = [
+    "src/agents/note_agent.py",
+    "src/agents/parser.py",
+    "src/agents/short_info.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\b",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.0",
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.4.0",
+    "pytest-mock>=3.15.0",
+    "pytest-cov>=7.0.0",
+    "pre-commit>=4.0.0",
+]

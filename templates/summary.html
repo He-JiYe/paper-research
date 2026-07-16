@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paper Research — Arxiv 论文跟踪</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        #section-unmarked .section-header { border-left: 4px solid #e67e22; }
+        #section-marked .section-header   { border-left: 4px solid #27ae60; }
+        #section-lurk .section-header     { border-left: 4px solid #95a5a6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📄 Arxiv 论文跟踪 — 累积摘要</h1>
+            <div class="update-time">
+                更新于 {{ update_time }} &nbsp;|&nbsp;
+                共 {{ stats.total }} 篇 &nbsp;|&nbsp;
+                待审核：<span id="unmarked-count">{{ stats.unmarked }}</span>
+                &nbsp;|&nbsp; <a href="/notes" class="action-btn">📚 笔记画廊</a>
+                &nbsp;|&nbsp; <button onclick="showFetchModal()" class="action-btn">🔄 抓取</button>
+                <button onclick="doRefresh()" class="action-btn">🔃 刷新</button>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item important">
+                <div class="stat-num">{{ stats.important }}</div>
+                <div class="stat-label">⭐ 重要</div>
+            </div>
+            <div class="stat-item useful">
+                <div class="stat-num">{{ stats.useful }}</div>
+                <div class="stat-label">👍 值得关注</div>
+            </div>
+            <div class="stat-item browse">
+                <div class="stat-num">{{ stats.browse }}</div>
+                <div class="stat-label">📄 可浏览</div>
+            </div>
+            <div class="stat-item unmarked">
+                <div class="stat-num" id="stat-unmarked">{{ stats.unmarked }}</div>
+                <div class="stat-label">⏳ 待审核</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-num">{{ stats.deep_read }}</div>
+                <div class="stat-label">🔬 精读</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-num">{{ stats.skim }}</div>
+                <div class="stat-label">📖 粗读</div>
+            </div>
+        </div>
+
+        <div class="filters">
+            <button class="filter-btn active" onclick="filterByRemark('all', this)">全部</button>
+            <button class="filter-btn" onclick="filterByRemark('important', this)">⭐ 重要</button>
+            <button class="filter-btn" onclick="filterByRemark('useful', this)">👍 值得关注</button>
+            <button class="filter-btn" onclick="filterByRemark('browse', this)">📄 可浏览</button>
+            <button class="filter-btn" onclick="filterByRemark('unmarked', this)">⏳ 待审核</button>
+            {% for cat_id, info in category_info.items() %}
+                {% if info.unmarked > 0 %}
+                <button class="filter-btn" onclick="filterByCategory(event, '{{ cat_id }}')"
+                        data-category-id="{{ cat_id }}"
+                        data-total="{{ info.total }}">{{ info.name }} ({{ info.unmarked }}/{{ info.total }})</button>
+                {% endif %}
+            {% endfor %}
+        </div>
+
+        <!-- DB Search -->
+        <details class="db-search-details">
+            <summary class="db-search-summary">🔍 搜索库内论文</summary>
+            <div class="db-search">
+                <input id="db-search-input" type="text" placeholder="搜索标题/作者/arXiv ID..." onkeydown="if(event.key==='Enter') searchDbPapers()">
+                <button onclick="searchDbPapers()" class="action-btn">搜索</button>
+                <button onclick="clearDbSearch()" class="action-btn btn-clear">清除</button>
+            </div>
+            <div id="db-search-results"></div>
+        </details>
+
+        {% include "_fetch_modal.html" %}
+
+        <div id="paper-list">
+            {% set sections = sections %}
+            {% for sec_name in ["unmarked", "marked", "lurk"] %}
+                {% set papers = sections[sec_name] %}
+                {% if papers %}
+                <div class="section" id="section-{{ sec_name }}">
+                    <div class="section-header" onclick="toggleSection('{{ sec_name }}')">
+                        <span class="section-title">({{ papers|length }}) {{ SECTION_LABELS[sec_name] }}</span>
+                        <span class="section-toggle">[-]</span>
+                    </div>
+                    <div class="section-body" id="section-body-{{ sec_name }}">
+                    {% for p in papers %}
+                        {% set arxiv_id = p["arxiv_id"] %}
+                        {% set title = p.get("title", "") %}
+                        {% set authors = p.get("authors", "") %}
+                        {% set abstract = (p.get("abstract", "") or "")[:500] %}
+                        {% set url = p.get("url", "https://arxiv.org/abs/" ~ arxiv_id) %}
+                        {% set remark = p.get("llm_remark", "browse") %}
+                        {% set reason = p.get("llm_reason", "") %}
+                        {% set summary = p.get("llm_summary", "") %}
+                        {% set score = p.get("llm_score", 0) %}
+                        {% set published = p.get("published", "") %}
+                        {% set keyword = p.get("keyword_match", "") %}
+                        {% set is_updated = p.get("is_updated", 0) %}
+                        {% set old_v = p.get("old_version", 0) %}
+                        {% set new_v = p.get("version", 1) %}
+                        {% set user_mark = p.get("user_mark", "") %}
+                        {% set categories = p.get("categories", "") %}
+                        {% set raw_category = p.get("keyword_match", "") %}
+                        {% set category_id = raw_category.lower().replace(" ", "-") if raw_category else "" %}
+                        {% set mark_cls = user_mark.replace("_", "-") if user_mark else "unmarked" %}
+                        {% set has_mark = user_mark not in ("", none) %}
+                        {% set show_buttons = true %}
+
+                        <div class="paper-card state-{{ mark_cls }}" id="card-{{ arxiv_id }}"
+                             data-remark="{{ remark }}" data-published="{{ published }}"
+                             data-keyword="{{ keyword }}" data-category="{{ category_id }}"
+                             data-mark="{{ user_mark }}">
+                            <div class="card-header">
+                                <h3 class="card-title">
+                                    <a href="{{ url }}" target="_blank" rel="noopener">[{{ arxiv_id }}] {{ title }}</a>
+                                    {% if is_updated %}
+                                    <span class="badge badge-updated">UPD v{{ old_v }}->v{{ new_v }}</span>
+                                    {% endif %}
+                                </h3>
+                                <div class="card-meta">
+                                    <span class="remark-badge" style="background:{{ REMARK_COLORS.get(remark, '#999') }}">{{ REMARK_LABELS.get(remark, remark) }}</span>
+                                    <span class="score-badge">Score: {{ "%.2f"|format(score) }}</span>
+                                    {% if user_mark %}
+                                    <span class="mark-badge mark-{{ mark_cls }}">
+                                        {%- if user_mark == "skim" %}📖 粗读
+                                        {%- elif user_mark == "deep_read" %}🔬 精读
+                                        {%- elif user_mark == "lurk" %}⏳ 延后
+                                        {%- elif user_mark == "ignore" %}🗑️ 忽略
+                                        {%- else %}{{ user_mark }}{% endif -%}
+                                    </span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="card-authors"><strong>Authors:</strong> {{ authors }}</div>
+                                <div class="card-categories"><strong>Categories:</strong> {{ categories }}</div>
+                                <div class="card-keyword"><strong>Keyword:</strong> {{ keyword }}</div>
+                                <div class="card-published"><strong>Published:</strong> {{ published }}</div>
+                                <div class="card-ai-summary"><strong>AI Summary:</strong> {{ summary }}</div>
+                                <div class="card-ai-reason"><strong>Reason:</strong> {{ reason }}</div>
+                                <details class="card-abstract-details">
+                                    <summary>View Original Abstract</summary>
+                                    <p class="card-abstract">{{ abstract }}</p>
+                                </details>
+                            </div>
+                            <div class="card-footer">
+                                {% if show_buttons %}
+                                <div class="mark-buttons">
+                                    <button class="btn-mark btn-ignore" onclick="markPaper('{{ arxiv_id }}', 'ignore')" {% if user_mark == 'ignore' %}disabled{% endif %}>🗑️ 忽略</button>
+                                    <button class="btn-mark btn-lurk" onclick="markPaper('{{ arxiv_id }}', 'lurk')" {% if user_mark == 'lurk' %}disabled{% endif %}>⏳ 延后</button>
+                                    <button class="btn-mark btn-skim" onclick="markPaper('{{ arxiv_id }}', 'skim')" {% if user_mark == 'skim' %}disabled{% endif %}>📖 粗读</button>
+                                    <button class="btn-mark btn-deep" onclick="markPaper('{{ arxiv_id }}', 'deep_read')" {% if user_mark == 'deep_read' %}disabled{% endif %}>🔬 精读</button>
+                                    <button class="btn-mark btn-pending" onclick="markPaper('{{ arxiv_id }}', 'pending')" {% if not user_mark %}disabled{% endif %}>⏳ 待审核</button>
+                                </div>
+                                {% endif %}
+                                <div class="mark-result" id="result-{{ arxiv_id }}"></div>
+                            </div>
+                        </div>
+                    {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+            {% endfor %}
+            {% if not sections.unmarked and not sections.marked and not sections.lurk %}
+            <div class="empty-state"><p>暂无待审核论文</p></div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- 分类管理模态框 -->
+    <div id="cat-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;padding:40px;">
+        <div style="background:white;max-width:500px;margin:0 auto;border-radius:8px;padding:24px;">
+            <h3 style="margin:0 0 12px;">管理自定义分类</h3>
+            <div id="cat-list" style="margin-bottom:16px;"></div>
+            <div style="display:flex;gap:8px;margin-bottom:16px;">
+                <input id="new-cat-name" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:14px;" placeholder="新分类名称">
+                <button onclick="addCategory()" class="action-btn">添加</button>
+            </div>
+            <button onclick="closeCatManager()" style="background:#ecf0f1;border:none;padding:8px;border-radius:4px;cursor:pointer;width:100%;">关闭</button>
+            <div id="cat-result" style="margin-top:12px;font-size:13px;color:#555;"></div>
+        </div>
+    </div>
+
+    <script>
+
+        /* DB Search */
+        async function searchDbPapers() {
+            const q = document.getElementById('db-search-input').value.trim();
+            const el = document.getElementById('db-search-results');
+            if (!q) { el.innerHTML = ''; return; }
+            el.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">搜索中...</div>';
+            try {
+                const res = await fetch('/api/search-db?q=' + encodeURIComponent(q));
+                const data = await res.json();
+                if (!data.papers || !data.papers.length) { el.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">未找到相关论文</div>'; return; }
+                let h = '<div class="db-search-results-inner"><div style="font-size:13px;color:#888;margin-bottom:8px;">找到 ' + data.papers.length + ' 篇论文:</div>';
+                data.papers.forEach(function(p) {
+                    const aid = p.arxiv_id || '';
+                    const remark = p.llm_remark || 'browse';
+                    const mark = p.user_mark || '';
+                    h += '<div class="db-search-card"><div style="flex:1;min-width:0;">';
+                    h += '<div style="font-weight:600;font-size:14px;">[' + aid + '] ' + (p.title||'').slice(0,80) + '</div>';
+                    h += '<div style="font-size:12px;color:#888;">' + (p.authors||'').slice(0,60) + ' | 评级: ' + remark + '</div></div>';
+                    h += '<div class="mark-buttons" style="flex-shrink:0;">';
+                    var types = [['ignore','忽略'],['lurk','延后'],['skim','粗读'],['deep_read','精读']];
+                    types.forEach(function(t) { h += '<button class="btn-mark btn-' + t[0] + '" onclick="markPaper(\'' + aid + '\',\'' + t[0] + '\')"' + (mark===t[0]?' disabled':'') + '>' + t[1] + '</button>'; });
+                    if (mark) h += '<button class="btn-mark btn-pending" onclick="markPaper(\'' + aid + '\',\'pending\')">待审核</button>';
+                    h += '</div></div>';
+                });
+                h += '</div>';
+                el.innerHTML = h;
+            } catch(e) { el.innerHTML = '<div style="text-align:center;padding:12px;color:#e74c3c;">搜索失败: ' + e.message + '</div>'; }
+        }
+        function clearDbSearch() { document.getElementById('db-search-input').value = ''; document.getElementById('db-search-results').innerHTML = ''; }
+
+        /* Keyword Management */
+        var _keywords = [];
+        async function loadKeywords() {
+            try {
+                var res = await fetch('/api/keywords');
+                _keywords = await res.json();
+                renderKeywords();
+            } catch(e) { var el = document.getElementById('kw-list'); if (el) el.innerHTML = '<div style="text-align:center;padding:12px;color:#e74c3c;">加载失败</div>'; }
+        }
+        function renderKeywords() {
+            var el = document.getElementById('kw-list');
+            if (!el) return;
+            if (!_keywords.length) { el.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">暂无关键词</div>'; return; }
+            var h = '';
+            _keywords.forEach(function(kw, i) {
+                var catDisplay = kw.arxiv_cats ? kw.arxiv_cats.join(', ') : (kw.arxiv_cat||'');
+                h += '<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid #eee;border-radius:4px;margin-bottom:6px;">';
+                h += '<input type="checkbox" ' + (kw.active!==false?'checked':'') + ' onchange="_keywords[' + i + '].active=this.checked" style="margin:0;">';
+                h += '<span style="flex:2;font-size:14px;font-weight:600;">' + (kw.keyword||'') + '</span>';
+                h += '<span style="flex:1;font-size:12px;color:#888;">' + catDisplay + '</span>';
+                h += '<button onclick="_keywords.splice(' + i + ',1);renderKeywords();" style="color:#e74c3c;background:none;border:none;cursor:pointer;">x</button></div>';
+            });
+            el.innerHTML = h;
+        }
+        function addKeywordItem() {
+            var kw = document.getElementById('kw-new-keyword');
+            var cat = document.getElementById('kw-new-cat');
+            if (!kw || !kw.value.trim()) return;
+            var rawCats = cat ? cat.value.trim() : '';
+            var catsList = rawCats ? rawCats.split(',').map(function(s){return s.trim();}).filter(function(s){return s;}) : ['cs.CV'];
+            _keywords.push({keyword: kw.value.trim(), arxiv_cats: catsList, active: true});
+            kw.value = ''; if (cat) cat.value = '';
+            renderKeywords();
+        }
+        async function saveKeywords() {
+            var el = document.getElementById('kw-result');
+            if (!el) return;
+            el.textContent = '保存中...';
+            try {
+                var res = await fetch('/api/keywords', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_keywords)});
+                el.textContent = res.ok ? '保存成功!' : '保存失败';
+                el.style.color = res.ok ? '#27ae60' : '#e74c3c';
+            } catch(e) { el.textContent = '错误: ' + e.message; el.style.color = '#e74c3c'; }
+        }
+        /* ─── SSE: 等待后台抓取结果 ─── */
+        function waitFetchResult(callback) {
+            var evtSource = new EventSource('/api/fetch-status-stream');
+            evtSource.onmessage = function(event) {
+                evtSource.close();
+                callback(JSON.parse(event.data));
+            };
+            evtSource.onerror = function() {
+                evtSource.close();
+            };
+        }
+
+        async function fetchByConfig() {
+            var el = document.getElementById('kw-result');
+            if (!el) return;
+            el.textContent = '正在按配置抓取...';
+            try {
+                var res = await fetch('/api/fetch', {method:'POST'});
+                if (!res.ok) { el.textContent = '启动抓取失败'; return; }
+                el.textContent = '抓取已启动...';
+                waitFetchResult(function(st) {
+                    alert('抓取完成! ' + st.fetched + ' 篇, ' + st.new + ' 篇新增.');
+                    location.reload();
+                });
+            } catch(e) { el.textContent = '错误: ' + e.message; }
+        }
+
+        /* ─── Settings API: 读取/保存 arxiv 设置 ─── */
+        async function loadSettings() {
+            try {
+                var res = await fetch('/api/settings');
+                var data = await res.json();
+                var targetEl = document.getElementById('kw-target-new');
+                var lbEl = document.getElementById('kw-lookback-days');
+                if (targetEl && data.target_new_per_keyword) targetEl.value = data.target_new_per_keyword;
+                if (lbEl && data.lookback_days) lbEl.value = data.lookback_days;
+            } catch(e) { console.warn('loadSettings failed:', e); }
+        }
+        async function saveAllSettings() {
+            var el = document.getElementById('kw-result');
+            if (!el) return;
+            el.textContent = '保存中...';
+            /* 先保存关键词 */
+            try {
+                var kwRes = await fetch('/api/keywords', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_keywords)});
+                if (!kwRes.ok) { el.textContent = '关键词保存失败'; el.style.color = '#e74c3c'; return; }
+            } catch(e) { el.textContent = '关键词保存错误: ' + e.message; el.style.color = '#e74c3c'; return; }
+            /* 再保存 arxiv 设置 */
+            try {
+                var targetVal = parseInt(document.getElementById('kw-target-new').value) || 25;
+                var lbVal = parseInt(document.getElementById('kw-lookback-days').value) || 90;
+                var setRes = await fetch('/api/settings', {
+                    method:'PUT',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({target_new_per_keyword: targetVal, lookback_days: lbVal})
+                });
+                el.textContent = setRes.ok ? '保存成功!' : '设置保存失败';
+                el.style.color = setRes.ok ? '#27ae60' : '#e74c3c';
+            } catch(e) { el.textContent = '设置保存错误: ' + e.message; el.style.color = '#e74c3c'; }
+        }
+        function showFetchModal() { document.getElementById('fetch-modal').style.display = ''; }
+        function closeFetchModal() { document.getElementById('fetch-modal').style.display = 'none'; }
+
+        async function doFetch() {
+            const kw = document.getElementById('fetch-keyword').value;
+            const checks = document.querySelectorAll('#cat-checkboxes input[type=checkbox]:checked');
+            const cats = Array.from(checks).map(c => c.value).join(',');
+            const max = document.getElementById('fetch-max').value;
+            const el = document.getElementById('fetch-result');
+            el.textContent = 'Fetching...';
+            try {
+                const params = new URLSearchParams();
+                if (kw) params.append('keyword', kw);
+                if (cats) params.append('arxiv_cats', cats);
+                params.append('max_results', max);
+                el.textContent = 'Fetch started, waiting for results...';
+                waitFetchResult(function(st) {
+                    alert('Fetch complete! ' + st.fetched + ' papers, ' + st.new + ' new.');
+                    location.reload();
+                });
+                const res = await fetch('/api/fetch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: params.toString(),
+                });
+                if (!res.ok) { el.textContent = 'Fetch failed!'; }
+            } catch(e) { el.textContent = 'Error: ' + e.message; }
+        }
+
+        async function doRefresh() {
+            await fetch('/api/refresh', {method: 'POST'});
+            location.reload();
+        }
+
+        async function markPaper(arxivId, markType) {
+            const resultEl = document.getElementById('result-' + arxivId);
+            if (resultEl) resultEl.textContent = '标记中...';
+            try {
+                const params = new URLSearchParams();
+                params.append('arxiv_id', arxivId);
+                params.append('mark_type', markType);
+                const res = await fetch('/mark', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: params.toString(),
+                });
+                if (res.ok) { setTimeout(() => location.reload(), 800); }
+                else { if (resultEl) { resultEl.textContent = '标记失败'; resultEl.style.color = '#e74c3c'; } }
+            } catch(e) { if (resultEl) { resultEl.textContent = '网络错误'; resultEl.style.color = '#e74c3c'; } }
+        }
+
+        function filterByRemark(remark, el) {
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            (el || event.target).classList.add('active');
+            document.querySelectorAll('.paper-card').forEach(card => {
+                if (remark === 'all') { card.style.display = ''; }
+                else if (remark === 'unmarked') {
+                    card.style.display = card.querySelector('.mark-badge') ? 'none' : '';
+                } else {
+                    card.style.display = card.getAttribute('data-remark') === remark ? '' : 'none';
+                }
+            });
+            updateSectionCounts();
+        }
+
+        function filterByCategory(ev, cat) {
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            (ev.target).classList.add('active');
+            document.querySelectorAll('.paper-card').forEach(card => {
+                card.style.display = card.getAttribute('data-category') === cat ? '' : 'none';
+            });
+            updateSectionCounts();
+        }
+
+        function updateSectionCounts() {
+            ['unmarked', 'marked', 'lurk'].forEach(function(sec) {
+                const body = document.getElementById('section-body-' + sec);
+                if (!body) return;
+                const cards = body.querySelectorAll('.paper-card');
+                let shown = 0;
+                cards.forEach(function(c) { if (c.style.display !== 'none') shown++; });
+                const titleEl = document.querySelector('#section-' + sec + ' .section-title');
+                if (titleEl) {
+                    const txt = titleEl.textContent;
+                    const label = txt.replace(/^\(\d+\) /, '');
+                    titleEl.textContent = '(' + shown + ') ' + label;
+                }
+            });
+        }
+
+        function toggleSection(name) {
+            const body = document.getElementById('section-body-' + name);
+            if (body) {
+                body.classList.toggle('collapsed');
+                const toggle = document.querySelector('#section-' + name + ' .section-toggle');
+                if (toggle) toggle.textContent = body.classList.contains('collapsed') ? '[+]' : '[-]';
+            }
+        }
+
+        /* ─── Search & Import ─── */
+        function switchFetchTab(tab) {
+            ['keyword','search','keywords'].forEach(t => {
+                const btn = document.getElementById('ftab-'+t);
+                if (!btn) return;
+                btn.style.color = t === tab ? '#667eea' : '#888';
+                btn.style.borderBottom = t === tab ? '2px solid #667eea' : '2px solid transparent';
+                btn.style.fontWeight = t === tab ? '600' : '400';
+                btn.classList.toggle('active', t === tab);
+            });
+            ['fpanel-keyword','fpanel-search','fpanel-keywords'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = id === 'fpanel-' + tab ? '' : 'none';
+            });
+            if (tab === 'keywords') { loadKeywords(); loadSettings(); }
+        }
+        let _searchResults = [];
+        async function doSearch() {
+            const q = document.getElementById('search-query').value.trim();
+            if (!q) return;
+            const el = document.getElementById('search-results');
+            el.innerHTML = '<div style="text-align:center;padding:20px;color:#999;">搜索中...</div>';
+            try {
+                const res = await fetch('/api/search?q='+encodeURIComponent(q)+'&max=20');
+                const data = await res.json();
+                _searchResults = data.papers || [];
+                if (!_searchResults.length) {
+                    el.innerHTML = '<div style="text-align:center;padding:20px;color:#999;">未找到相关论文</div>';
+                    document.getElementById('import-btn').disabled = true;
+                    document.getElementById('import-btn').textContent = '导入选中 (0 篇)';
+                    return;
+                }
+                let html = '<div style="margin-bottom:8px;"><label style="font-size:13px;cursor:pointer;"><input type="checkbox" onchange="toggleSelectAll(this)"> 全选</label></div>';
+                _searchResults.forEach((p, i) => {
+                    const aid = p.arxiv_id || '';
+                    const title = p.title || '';
+                    const authors = (p.authors || '').slice(0, 60);
+                    const pub = p.published || '';
+                    const abst = (p.abstract || '').slice(0, 300);
+                    html += '<div style="padding:8px;border:1px solid #eee;border-radius:4px;margin-bottom:6px;">';
+                    html += '<label style="cursor:pointer;display:flex;gap:8px;align-items:flex-start;">';
+                    html += '<input type="checkbox" class="spaper" value="'+aid+'" onchange="updateImportBtn()" style="margin-top:3px;">';
+                    html += '<div style="flex:1;font-size:13px;">';
+                    html += '<strong>['+aid+']</strong> ' + title.slice(0, 100);
+                    html += '<div style="color:#888;font-size:12px;">'+authors+' | '+pub+'</div>';
+                    html += '<details style="font-size:12px;color:#666;margin-top:2px;"><summary>摘要</summary>'+abst+'</details>';
+                    html += '</div></label></div>';
+                });
+                el.innerHTML = html;
+                document.getElementById('import-btn').disabled = false;
+                updateImportBtn();
+            } catch(e) { el.innerHTML = '<div style="text-align:center;padding:20px;color:#e74c3c;">搜索失败: '+e.message+'</div>'; }
+        }
+        function toggleSelectAll(el) { document.querySelectorAll('.spaper').forEach(c => c.checked = el.checked); updateImportBtn(); }
+        function updateImportBtn() {
+            const n = document.querySelectorAll('.spaper:checked').length;
+            const btn = document.getElementById('import-btn');
+            btn.disabled = n === 0;
+            btn.textContent = '导入选中 ('+n+' 篇)';
+        }
+        async function doImport() {
+            const checked = document.querySelectorAll('.spaper:checked');
+            const ids = Array.from(checked).map(c => c.value);
+            if (!ids.length) return;
+            const btn = document.getElementById('import-btn');
+            const statusEl = document.getElementById('import-status');
+            btn.disabled = true;
+            statusEl.textContent = '正在导入 '+ids.length+' 篇...';
+            try {
+                const res = await fetch('/api/import-papers', {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ids: ids})
+                });
+                if (res.ok) {
+                    waitFetchResult(function(st) {
+                        alert('导入完成! ' + st.fetched + ' 篇, 新增 ' + st.new + ' 篇.');
+                        location.reload();
+                    });
+                } else { statusEl.textContent = '导入失败!'; btn.disabled = false; }
+            } catch(e) { statusEl.textContent = '错误: ' + e.message; btn.disabled = false; }
+        }
+
+        /* ─── Category Manager ─── */
+        async function showCategoryManager() {
+            document.getElementById('cat-modal').style.display = '';
+            const el = document.getElementById('cat-list');
+            const res = await fetch('/api/categories');
+            const cats = await res.json();
+            el.innerHTML = cats.map(c =>
+                '<div style="padding:8px 0;border-bottom:1px solid #eee;display:flex;justify-content:space-between;"><span>'+c.name+'</span><button onclick="deleteCategory('+c.id+')" style="color:#e74c3c;background:none;border:none;cursor:pointer;">Delete</button></div>'
+            ).join('');
+        }
+        async function addCategory() {
+            const name = document.getElementById('new-cat-name').value.trim();
+            if(!name) return;
+            await fetch('/api/categories', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'name='+encodeURIComponent(name)});
+            document.getElementById('new-cat-name').value = '';
+            showCategoryManager();
+        }
+        async function deleteCategory(id) {
+            if(!confirm('确定删除?')) return;
+            await fetch('/api/categories/'+id, {method:'DELETE'});
+            showCategoryManager(); location.reload();
+        }
+        function closeCatManager() { document.getElementById('cat-modal').style.display = 'none'; }
+    </script>
+</body>
+</html>
