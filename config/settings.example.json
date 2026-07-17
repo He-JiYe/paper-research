@@ -7,12 +7,12 @@
         "temperature": 0.3,
         "max_tokens": 5000
     },
-    "arxiv": {
-        "delay_between_requests": 1.0,
+    "fetch": {
+        "source": "arxiv",
         "max_concurrent_requests": 5,
-        "lookback_days": 90,
-        "target_new_per_keyword": 25,
-        "user_agent": "PaperResearch/1.0 (+https://github.com/23087/paper-research; mailto:user@example.com)"
+        "lookback_days": 3,
+        "max_results": 25,
+        "user_agent": "PaperResearch/1.0"
     },
     "server": {
         "host": "127.0.0.1",
@@ -34,3 +34,4 @@
         "min_relevance_score": 0.3
     }
 }
+

@@ -3,10 +3,14 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from src.serve.renderer import (REMARK_COLORS, REMARK_LABELS, SECTION_LABELS,
-                                generate_landing_html,
-                                generate_notes_index_html,
-                                generate_summary_html, render_note_detail_html)
+from src.serve.renderer import (
+    REMARK_COLORS,
+    REMARK_LABELS,
+    SECTION_LABELS,
+    generate_notes_index_html,
+    generate_summary_html,
+    render_note_detail_html,
+)
 
 
 class TestConstants:
@@ -93,13 +97,6 @@ class TestGenerateSummaryHtml:
         path = generate_summary_html(grouped, output_dir=temp_dir)
         assert path.parent.name == "summaries"
         assert path.name == "index.html"
-
-    def test_generate_landing_html_alias(self, temp_dir):
-        """generate_landing_html 是 generate_summary_html 的别名"""
-        grouped = {"unmarked": [], "marked": [], "lurk": []}
-        path1 = generate_summary_html(grouped, output_dir=temp_dir)
-        path2 = generate_landing_html(grouped, output_dir=temp_dir)
-        assert path1 == path2
 
     def test_generate_summary_html_default_output_dir(self, monkeypatch):
         """不指定 output_dir 时使用默认值"""

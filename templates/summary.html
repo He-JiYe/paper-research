@@ -280,9 +280,13 @@
         async function fetchByConfig() {
             var el = document.getElementById('kw-result');
             if (!el) return;
-            el.textContent = '正在按配置抓取...';
+            var modeEl = document.querySelector('input[name="config-fetch-mode"]:checked');
+            var mode = modeEl ? modeEl.value : 'incremental';
+            el.textContent = '正在按配置抓取(' + mode + '模式)...';
             try {
-                var res = await fetch('/api/fetch', {method:'POST'});
+                var params = new URLSearchParams();
+                params.append('mode', mode);
+                var res = await fetch('/api/fetch', {method:'POST', body: params});
                 if (!res.ok) { el.textContent = '启动抓取失败'; return; }
                 el.textContent = '抓取已启动...';
                 waitFetchResult(function(st) {
@@ -301,6 +305,10 @@
                 var lbEl = document.getElementById('kw-lookback-days');
                 if (targetEl && data.target_new_per_keyword) targetEl.value = data.target_new_per_keyword;
                 if (lbEl && data.lookback_days) lbEl.value = data.lookback_days;
+                /* 更新抓取模式提示中的 lookback_days */
+                var lbDays = data.lookback_days || 7;
+                var hints = document.querySelectorAll('#fetch-lb-days, #fetch-lb-days-hint, #cfg-lb-days');
+                hints.forEach(function(el) { if (el) el.textContent = lbDays; });
             } catch(e) { console.warn('loadSettings failed:', e); }
         }
         async function saveAllSettings() {
@@ -327,12 +335,25 @@
         }
         function showFetchModal() { document.getElementById('fetch-modal').style.display = ''; }
         function closeFetchModal() { document.getElementById('fetch-modal').style.display = 'none'; }
+        function toggleFetchModeHint() {
+            const mode = document.querySelector('input[name="fetch-mode"]:checked')?.value;
+            const hint = document.getElementById('fetch-mode-hint');
+            if (!hint) return;
+            if (mode === 'historical') {
+                hint.innerHTML = '📋 从 Arxiv 全量历史数据中按相关性排序抓取，无时间限制。适合首次建库或补充历史论文。';
+            } else {
+                const days = document.getElementById('fetch-lb-days-hint')?.textContent || '7';
+                hint.innerHTML = '📋 获取最近 ' + days + ' 天内与关键词最相关的论文，适合每日定时增量抓取。';
+            }
+        }
 
         async function doFetch() {
             const kw = document.getElementById('fetch-keyword').value;
             const checks = document.querySelectorAll('#cat-checkboxes input[type=checkbox]:checked');
             const cats = Array.from(checks).map(c => c.value).join(',');
             const max = document.getElementById('fetch-max').value;
+            const modeEl = document.querySelector('input[name="fetch-mode"]:checked');
+            const mode = modeEl ? modeEl.value : 'incremental';
             const el = document.getElementById('fetch-result');
             el.textContent = 'Fetching...';
             try {
@@ -340,6 +361,7 @@
                 if (kw) params.append('keyword', kw);
                 if (cats) params.append('arxiv_cats', cats);
                 params.append('max_results', max);
+                params.append('mode', mode);
                 el.textContent = 'Fetch started, waiting for results...';
                 waitFetchResult(function(st) {
                     alert('Fetch complete! ' + st.fetched + ' papers, ' + st.new + ' new.');

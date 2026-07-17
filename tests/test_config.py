@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from src.config import (OUTPUT_DIR, ROOT_DIR, AppConfig, ArxivConfig,
+from src.config import (OUTPUT_DIR, ROOT_DIR, AppConfig, FetchConfig,
                         EmailConfig, LLMConfig, NotificationConfig,
                         ScoringConfig, ServerConfig, _deep_merge, _load_json,
                         get_active_keywords, get_db_path, get_output_dir,
@@ -66,11 +66,12 @@ class TestDataclasses:
         assert cfg.temperature == 0.3
         assert cfg.max_tokens == 2000
 
-    def test_arxiv_config_defaults(self):
-        cfg = ArxivConfig()
-        assert cfg.max_concurrent_requests == 10
-        assert cfg.lookback_days == 90
+    def test_fetch_config_defaults(self):
+        cfg = FetchConfig()
+        assert cfg.max_concurrent_requests == 3
+        assert cfg.lookback_days == 7
         assert cfg.target_new_per_keyword == 25
+        assert cfg.max_results == 50
 
     def test_server_config_defaults(self):
         cfg = ServerConfig()
@@ -93,7 +94,8 @@ class TestDataclasses:
     def test_app_config_defaults(self):
         cfg = AppConfig()
         assert isinstance(cfg.llm, LLMConfig)
-        assert isinstance(cfg.arxiv, ArxivConfig)
+        assert isinstance(cfg.fetch, FetchConfig)
+        assert cfg.source == "arxiv"
         assert isinstance(cfg.server, ServerConfig)
         assert isinstance(cfg.notification, NotificationConfig)
         assert isinstance(cfg.scoring, ScoringConfig)
@@ -117,7 +119,7 @@ class TestLoadSettings:
         config = load_settings()
         assert isinstance(config, AppConfig)
         assert isinstance(config.llm, LLMConfig)
-        assert isinstance(config.arxiv, ArxivConfig)
+        assert isinstance(config.fetch, FetchConfig)
         assert isinstance(config.server, ServerConfig)
         assert isinstance(config.notification, NotificationConfig)
 

@@ -31,11 +31,13 @@ uv sync
 ### 2. 配置 API Key
 
 ```bash
-# 推荐：写入环境变量
+# 推荐：写入环境变量（不会存储在磁盘上）
 setx DEEPSEEK_API_KEY "sk-xxxxxxxxxxxxxxxx"
 ```
 
 > 密钥获取: https://platform.deepseek.com/api_keys
+>
+> **安全建议**：优先使用环境变量而非 `config/settings.json`，防止 API Key 以明文存储。
 
 ### 3. 配置关键词
 
@@ -43,24 +45,30 @@ setx DEEPSEEK_API_KEY "sk-xxxxxxxxxxxxxxxx"
 
 ```json
 [
-    {"keyword": "test-time adaptation",   "category": "Domain Adaptation", "arxiv_cat": "cs.CV", "active": true},
-    {"keyword": "large language model",    "category": "LLM",               "arxiv_cat": "cs.CL", "active": true}
+    {"keyword": "test-time adaptation",   "arxiv_cats": ["cs.CV", "cs.LG"], "active": true},
+    {"keyword": "large language model",    "arxiv_cats": ["cs.CL"],          "active": true}
 ]
 ```
 
 | 字段 | 说明 |
 |------|------|
 | `keyword` | 搜索关键词 |
-| `arxiv_cat` | 限定 Arxiv 学科分类（可选） |
+| `arxiv_cats` | 限定 Arxiv 学科分类（字符串数组，如 `["cs.CV", "cs.LG"]`） |
 | `active` | 启用/停用 |
 
 ### 4. 首次抓取
 
 ```bash
-uv run paper-research fetch
+uv run paper-research fetch # 默认增量抓取（抓取 lookback_days 时间段的相关论文）
+
+uv run paper-research fetch -m historical  # 历史抓取（不限时间抓取最相关的论文） 
 ```
 
-首次抓取会获取过去 `lookback_days` (默认 90) 天的 `target_new_per_keyword` (默认 10 篇) 论文，然后自动进行 LLM 评分和生成 HTML 摘要页，后续每次抓取优先抓取新论文，然后再补足早期的论文。
+数据抓取共有两种模式 `incremental` 和 `historical`：
+
+  - 默认情况下会启动 `incremental` 模式，该模式下会抓取过去 `lookback_days` (建议设置为 3 天，过大会导致抓取时间过长) 天的 `max_results` (默认 10 篇) 论文，然后自动进行 LLM 评分和生成 HTML 摘要页。
+  - 根据需要可以使用 `historical` 模式，该模式不会限制时间，自动抓取最相关的 `max_results` 篇论文（速度比 `incremental` 模式快得多）。
+
 
 ### 5. 打开 Web 审阅
 
@@ -158,6 +166,11 @@ uv run paper-research notify             # 手动触发通知
     }
 }
 ```
+
+> **安全建议**：密码也可通过环境变量 `EMAIL_PASSWORD` 设置，优先级高于 `settings.json`：
+> ```bash
+> setx EMAIL_PASSWORD "your-smtp-password"
+> ```
 
 ---
 
@@ -281,9 +294,12 @@ Arxiv API ──→ network/arxiv.py ──→ db.py ──→ agents/paper_scor
 
 ---
 
-## 注意事项
+## 安全说明
 
-- **API Key** 配置在 `config/settings.json` 或环境变量 `DEEPSEEK_API_KEY`
+- **API Key** 优先使用环境变量 `DEEPSEEK_API_KEY`，其次从 `config/settings.json` 读取
+- **邮件密码** 优先使用环境变量 `EMAIL_PASSWORD`，其次从 `config/settings.json` 读取
+- 所有文件路径已做**路径遍历防护**，恶意 `arxiv_id` 不会被解析到预期目录之外
+- 笔记中的 Markdown 内容在执行 HTML 渲染时已做 **XSS 防护**（`html.escape`）
 - Arxiv API **无需认证**，但有速率限制（建议 ≤ 1 请求/秒）
 - Deepseek 按 token 计费，每篇论文约消耗 ~500 tokens
 - 无 API Key 时自动使用关键词规则 fallback（精度较低）

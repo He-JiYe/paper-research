@@ -23,12 +23,13 @@ class LLMConfig:
 
 
 @dataclass
-class ArxivConfig:
+class FetchConfig:
     delay_between_requests: float = 0.3
     max_concurrent_requests: int = 3
-    lookback_days: int = 90
+    lookback_days: int = 3
     user_agent: str = ""
     target_new_per_keyword: int = 25
+    max_results: int = 50
 
 
 @dataclass
@@ -61,8 +62,9 @@ class ScoringConfig:
 
 @dataclass
 class AppConfig:
+    source: str = "arxiv"
     llm: LLMConfig = field(default_factory=LLMConfig)
-    arxiv: ArxivConfig = field(default_factory=ArxivConfig)
+    fetch: FetchConfig = field(default_factory=FetchConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
@@ -71,7 +73,7 @@ class AppConfig:
 def _load_json(filepath: Path) -> dict:
     """加载 JSON 文件，不存在则返回空字典"""
     if filepath.exists():
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
@@ -106,13 +108,14 @@ def load_settings() -> AppConfig:
         max_tokens=llm_data.get("max_tokens", 2000),
     )
 
-    arxiv_data = data.get("arxiv", {})
-    arxiv = ArxivConfig(
-        delay_between_requests=arxiv_data.get("delay_between_requests", 1.0),
-        max_concurrent_requests=arxiv_data.get("max_concurrent_requests", 10),
-        lookback_days=arxiv_data.get("lookback_days", 90),
-        user_agent=arxiv_data.get("user_agent", ""),
-        target_new_per_keyword=arxiv_data.get("target_new_per_keyword", 25),
+    fetch_data = data.get("fetch", {})
+    fetch = FetchConfig(
+        delay_between_requests=fetch_data.get("delay_between_requests", 0.3),
+        max_concurrent_requests=fetch_data.get("max_concurrent_requests", 3),
+        lookback_days=fetch_data.get("lookback_days", 7),
+        user_agent=fetch_data.get("user_agent", ""),
+        target_new_per_keyword=fetch_data.get("target_new_per_keyword", 25),
+        max_results=fetch_data.get("max_results", 50),
     )
 
     server_data = data.get("server", {})
@@ -123,12 +126,15 @@ def load_settings() -> AppConfig:
 
     notif_data = data.get("notification", {})
     email_data = notif_data.get("email", {})
+    config_email_pwd = email_data.get("password", "")
+    env_email_pwd = os.environ.get("EMAIL_PASSWORD", "")
+    email_data["password"] = env_email_pwd if env_email_pwd else config_email_pwd
     email = EmailConfig(
         enabled=email_data.get("enabled", False),
         smtp_host=email_data.get("smtp_host", ""),
         smtp_port=email_data.get("smtp_port", 465),
         username=email_data.get("username", ""),
-        password=email_data.get("password", ""),
+        password=email_data["password"],
         from_addr=email_data.get("from", ""),
         to_addr=email_data.get("to", ""),
     )
@@ -142,8 +148,10 @@ def load_settings() -> AppConfig:
         min_relevance_score=scoring_data.get("min_relevance_score", 0.3),
     )
 
+    source = data.get("source", "arxiv")
+
     return AppConfig(
-        llm=llm, arxiv=arxiv, server=server, notification=notification, scoring=scoring
+        source=source, llm=llm, fetch=fetch, server=server, notification=notification, scoring=scoring
     )
 
 
@@ -174,10 +182,5 @@ def get_output_dir() -> Path:
 
 def save_keywords(keywords: list[dict]) -> None:
     """保存关键词配置到 keywords.json"""
-    import json
-    from pathlib import Path
-
     path = ROOT_DIR / "config" / "keywords.json"
-    path.write_text(
-        json.dumps(keywords, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    path.write_text(json.dumps(keywords, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -99,11 +99,6 @@ def generate_summary_html(grouped: dict, output_dir: Path | None = None) -> Path
     return filepath
 
 
-def generate_landing_html(grouped: dict, output_dir: Path | None = None) -> Path:
-    """生成引导页面（与 summary HTML 相同）。"""
-    return generate_summary_html(grouped, output_dir)
-
-
 # ─── 笔记画廊 ──────────────────────────────────────────────
 
 

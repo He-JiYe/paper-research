@@ -2,8 +2,10 @@
 
 import asyncio
 import contextlib
+import html
 import logging
 import re
+from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -31,9 +33,7 @@ def init_logging():
     _logger = logging.getLogger("paper-research")
     _logger.setLevel(logging.INFO)
     if not _logger.handlers:
-        handler = logging.FileHandler(
-            log_dir / "server.log", encoding="utf-8", mode="a"
-        )
+        handler = logging.FileHandler(log_dir / "server.log", encoding="utf-8", mode="a")
         handler.setFormatter(
             logging.Formatter(
                 "[%(asctime)s] %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
@@ -52,6 +52,36 @@ def set_settings(settings):
     _settings = settings
 
 
+# ─── Helper: path traversal safety ────────────────────────
+
+
+def _safe_arxiv_path(base_dir: Path, arxiv_id: str, *parts: str) -> Path:
+    """安全拼接 arXiv 路径，防止路径遍历攻击。
+
+    Args:
+        base_dir: 基础目录（通常为 OUTPUT_DIR）
+        arxiv_id: arXiv ID（将替换 / 为 _ 兼容旧格式）
+        *parts:  路径后缀（如 "note.md", "figures", filename）
+
+    Returns:
+        解析后的安全路径
+
+    Raises:
+        ValueError: 检测到路径遍历时抛出
+    """
+    # 替换旧格式中的 / 防止路径穿越
+    safe_id = arxiv_id.replace("/", "_")
+    for part in parts:
+        if ".." in part or "/" in part or "\\" in part:
+            raise ValueError(f"Invalid path component: {part!r}")
+    parts_path = "/".join(parts)
+    full_path = (base_dir / "notes" / safe_id / parts_path).resolve()
+    base_resolved = base_dir.resolve()
+    if not str(full_path).startswith(str(base_resolved)):
+        raise ValueError(f"Path traversal detected: arxiv_id={arxiv_id!r}")
+    return full_path
+
+
 # ─── Helper: simple markdown to HTML ──────────────────────
 
 
@@ -63,13 +93,13 @@ def _md_to_html(text: str, arxiv_id: str = "") -> str:
         alt, src = m.group(1), m.group(2)
         if src.startswith("figures/"):
             src = f"{fig_prefix}{src.split('/', 1)[1]}"
-        return f'<img src="{src}" alt="{alt}" style="max-width:100%">'
+        return f'<img src="{html.escape(src)}" alt="{html.escape(alt)}" style="max-width:100%">'
 
     def _fix_link(m):
         text, href = m.group(1), m.group(2)
         if href.startswith("figures/"):
             href = f"{fig_prefix}{href.split('/', 1)[1]}"
-        return f'<a href="{href}">{text}</a>'
+        return f'<a href="{html.escape(href)}">{html.escape(text)}</a>'
 
     lines = text.split("\n")
     html_parts = []
@@ -79,18 +109,18 @@ def _md_to_html(text: str, arxiv_id: str = "") -> str:
         stripped = line.strip()
 
         if stripped.startswith("<!--") and stripped.endswith("-->"):
-            html_parts.append(f"<!--{stripped[4:-3]}-->")
+            html_parts.append(f"<!--{html.escape(stripped[4:-3])}-->")
             continue
 
         if stripped.startswith("## "):
             html_parts.append("</ul>" if in_list else "")
             in_list = False
-            html_parts.append(f"<h2>{stripped[3:]}</h2>")
+            html_parts.append(f"<h2>{html.escape(stripped[3:])}</h2>")
             continue
         if stripped.startswith("# "):
             html_parts.append("</ul>" if in_list else "")
             in_list = False
-            html_parts.append(f"<h1>{stripped[2:]}</h1>")
+            html_parts.append(f"<h1>{html.escape(stripped[2:])}</h1>")
             continue
 
         if stripped == "---":
@@ -103,7 +133,8 @@ def _md_to_html(text: str, arxiv_id: str = "") -> str:
             if not in_list:
                 html_parts.append("<ul>")
                 in_list = True
-            item = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", stripped[2:])
+            item = html.escape(stripped[2:])
+            item = re.sub(r"\*\*(.+?)\*\*", lambda m: f"<strong>{m.group(1)}</strong>", item)
             item = re.sub(r"!\[(.+?)\]\((.+?)\)", _fix_img, item)
             item = re.sub(r"\[(.+?)\]\((.+?)\)", _fix_link, item)
             html_parts.append(f"<li>{item}</li>")
@@ -119,7 +150,8 @@ def _md_to_html(text: str, arxiv_id: str = "") -> str:
         if in_list:
             html_parts.append("</ul>")
             in_list = False
-        paragraph = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
+        paragraph = html.escape(line)
+        paragraph = re.sub(r"\*\*(.+?)\*\*", lambda m: f"<strong>{m.group(1)}</strong>", paragraph)
         paragraph = re.sub(r"!\[(.+?)\]\((.+?)\)", _fix_img, paragraph)
         paragraph = re.sub(r"\[(.+?)\]\((.+?)\)", _fix_link, paragraph)
         html_parts.append(f"<p>{paragraph}</p>")
@@ -147,9 +179,7 @@ async def index():
     from src.serve.renderer import generate_summary_html
 
     if not _db_conn:
-        return HTMLResponse(
-            content="<h1>Database not initialized</h1>", status_code=500
-        )
+        return HTMLResponse(content="<h1>Database not initialized</h1>", status_code=500)
 
     grouped = get_papers_for_summary(_db_conn)
     path = generate_summary_html(grouped)
@@ -166,14 +196,9 @@ async def notes_index():
     from src.serve.renderer import generate_notes_index_html
 
     if not _db_conn:
-        return HTMLResponse(
-            content="<h1>Database not initialized</h1>", status_code=500
-        )
+        return HTMLResponse(content="<h1>Database not initialized</h1>", status_code=500)
     papers = [
-        dict(r)
-        for r in _db_conn.execute(
-            "SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500"
-        )
+        dict(r) for r in _db_conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500")
     ]
     path = generate_notes_index_html(papers, OUTPUT_DIR)
     html = path.read_text(encoding="utf-8")
@@ -183,17 +208,15 @@ async def notes_index():
 @app.get("/notes/{arxiv_id}", response_class=HTMLResponse)
 async def note_detail(arxiv_id: str):
     """笔记页: 左栏PDF链接 + 右栏笔记内容(查看/编辑合并)"""
-    note_path = OUTPUT_DIR / "notes" / arxiv_id / "note.md"
+    try:
+        note_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "note.md")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
     if not note_path.exists():
-        return HTMLResponse(
-            content=f"<h1>Note not found: {arxiv_id}</h1>", status_code=404
-        )
+        return HTMLResponse(content=f"<h1>Note not found: {arxiv_id}</h1>", status_code=404)
 
     raw = note_path.read_text(encoding="utf-8")
     body_html = _md_to_html(raw, arxiv_id)
-
-    title_match = re.search(r"<h1>(.+?)</h1>", body_html)
-    title = title_match.group(1) if title_match else f"Note: {arxiv_id}"
 
     # 论文元数据
     paper = None
@@ -202,11 +225,17 @@ async def note_detail(arxiv_id: str):
 
         paper = get_paper(_db_conn, arxiv_id)
 
+    # 标题优先级: note_short_title(DB) > h1(笔记正文) > arxiv_id 兜底
+    short_title = paper.get("note_short_title", "") if paper else ""
+    title_match = re.search(r"<h1>(.+?)</h1>", body_html)
+    h1_title = title_match.group(1) if title_match else ""
+    title = short_title or h1_title or arxiv_id
+
     from src.serve.renderer import render_note_detail_html
 
     html = render_note_detail_html(
         arxiv_id=arxiv_id,
-        title=title or (paper.get("note_short_title", "") if paper else "") or arxiv_id,
+        title=title,
         body_html=body_html,
         paper=paper,
     )
@@ -216,7 +245,10 @@ async def note_detail(arxiv_id: str):
 @app.get("/api/pdf/{arxiv_id}")
 async def proxy_pdf(arxiv_id: str):
     """代理 PDF：优先本地 → 下载 → HTML fallback"""
-    local_pdf = OUTPUT_DIR / "notes" / arxiv_id / "paper.pdf"
+    try:
+        local_pdf = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "paper.pdf")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
     if local_pdf.exists() and local_pdf.stat().st_size > 10000:
         from fastapi.responses import FileResponse
 
@@ -229,10 +261,10 @@ async def proxy_pdf(arxiv_id: str):
             },
         )
     # 本地无 PDF，尝试下载
-    from src.network.arxiv import download_pdf
+    from src.network.factory import get_source
 
     try:
-        pdf_path = await download_pdf(arxiv_id, OUTPUT_DIR)
+        pdf_path = await get_source(_settings).download_pdf(arxiv_id, OUTPUT_DIR)
         from fastapi.responses import FileResponse
 
         return FileResponse(
@@ -264,7 +296,10 @@ async def proxy_pdf(arxiv_id: str):
 @app.get("/notes/{arxiv_id}/figures/{filename}")
 async def note_figure(arxiv_id: str, filename: str):
     """提供笔记中的图表文件"""
-    fig_path = OUTPUT_DIR / "notes" / arxiv_id / "figures" / filename
+    try:
+        fig_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "figures", filename)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
     if not fig_path.exists():
         raise HTTPException(status_code=404)
     from fastapi.responses import FileResponse
@@ -304,7 +339,11 @@ async def mark_paper(
     _log("info", f"Marked {arxiv_id} as {mark_type}")
 
     if mark_type in ("skim", "deep_read"):
-        note_path = OUTPUT_DIR / "notes" / arxiv_id / "note.md"
+        try:
+            note_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "note.md")
+        except ValueError:
+            _log("error", f"Invalid arxiv_id for note path: {arxiv_id}")
+            raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
         if note_path.exists() and not force:
             _log("info", f"Note exists, skip: {arxiv_id}")
         else:
@@ -313,9 +352,7 @@ async def mark_paper(
     asyncio.create_task(_refresh_snapshot())
     asyncio.create_task(_refresh_notes_index())
 
-    return JSONResponse(
-        content={"status": "ok", "arxiv_id": arxiv_id, "mark_type": mark_type}
-    )
+    return JSONResponse(content={"status": "ok", "arxiv_id": arxiv_id, "mark_type": mark_type})
 
 
 # ─── Note Editor API ──────────────────────────────────────
@@ -324,7 +361,10 @@ async def mark_paper(
 @app.get("/api/note/{arxiv_id}")
 async def get_note(arxiv_id: str):
     """获取笔记原始 markdown 内容（供编辑器加载）"""
-    note_path = OUTPUT_DIR / "notes" / arxiv_id / "note.md"
+    try:
+        note_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "note.md")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
     if not note_path.exists():
         return HTMLResponse(content="", status_code=404)
     content = note_path.read_text(encoding="utf-8")
@@ -336,9 +376,12 @@ async def save_note(arxiv_id: str, request: Request):
     """保存笔记内容（从在线编辑器写入本地 .md 文件）"""
     body_bytes = await request.body()
     body = body_bytes.decode("utf-8")
-    note_dir = OUTPUT_DIR / "notes" / arxiv_id
+    try:
+        note_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "note.md")
+        note_dir = note_path.parent
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
     note_dir.mkdir(parents=True, exist_ok=True)
-    note_path = note_dir / "note.md"
     note_path.write_text(body, encoding="utf-8")
     print(f"  [OK] Note saved: {arxiv_id}")
     return JSONResponse(content={"status": "ok", "arxiv_id": arxiv_id})
@@ -425,9 +468,7 @@ async def save_keywords(request: Request):
 
     body = await request.json()
     if not isinstance(body, list):
-        raise HTTPException(
-            status_code=400, detail="Expected a list of keyword objects"
-        )
+        raise HTTPException(status_code=400, detail="Expected a list of keyword objects")
     save_keywords(body)
     return JSONResponse(content={"status": "ok", "count": len(body)})
 
@@ -437,14 +478,14 @@ async def save_keywords(request: Request):
 
 @app.get("/api/settings")
 async def get_settings():
-    """获取当前 arxiv 设置"""
+    """获取当前 fetch 设置"""
     if not _settings:
         raise HTTPException(status_code=500, detail="Not initialized")
     return JSONResponse(
         content={
-            "target_new_per_keyword": _settings.arxiv.target_new_per_keyword,
-            "lookback_days": _settings.arxiv.lookback_days,
-            "max_concurrent_requests": _settings.arxiv.max_concurrent_requests,
+            "target_new_per_keyword": _settings.fetch.target_new_per_keyword,
+            "lookback_days": _settings.fetch.lookback_days,
+            "max_concurrent_requests": _settings.fetch.max_concurrent_requests,
         }
     )
 
@@ -461,21 +502,32 @@ async def update_settings(request: Request):
     body = await request.json()
     settings_path = CONFIG_DIR / "settings.json"
 
-    existing = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
-    if "arxiv" not in existing:
-        existing["arxiv"] = {}
+    existing = (
+        json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+    )
+    if "fetch" not in existing:
+        existing["fetch"] = {}
 
     if "target_new_per_keyword" in body:
-        val = int(body["target_new_per_keyword"])
-        existing["arxiv"]["target_new_per_keyword"] = val
-        _settings.arxiv.target_new_per_keyword = val
+        try:
+            val = int(body["target_new_per_keyword"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="target_new_per_keyword must be an integer")
+        existing["fetch"]["target_new_per_keyword"] = val
+        _settings.fetch.target_new_per_keyword = val
     if "lookback_days" in body:
-        val = int(body["lookback_days"])
-        existing["arxiv"]["lookback_days"] = val
-        _settings.arxiv.lookback_days = val
+        try:
+            val = int(body["lookback_days"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="lookback_days must be an integer")
+        existing["fetch"]["lookback_days"] = val
+        _settings.fetch.lookback_days = val
 
     settings_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
-    _log("info", f"Settings updated: target_new_per_keyword={_settings.arxiv.target_new_per_keyword}, lookback_days={_settings.arxiv.lookback_days}")
+    _log(
+        "info",
+        f"Settings updated: target_new_per_keyword={_settings.fetch.target_new_per_keyword}, lookback_days={_settings.fetch.lookback_days}",
+    )
     return JSONResponse(content={"status": "ok"})
 
 
@@ -501,7 +553,6 @@ async def papers():
 
 # ─── Fetch Status ────────────────────────────────────────
 
-FETCH_STATUS_CACHE = {"fetched": 0, "new": 0, "pending": False}
 _sse_clients: list["asyncio.Queue[dict]"] = []
 
 
@@ -535,25 +586,6 @@ async def fetch_status_stream():
     return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
 
-@app.get("/api/fetch_status")
-async def get_fetch_status():
-    """获取抓取状态（前端轮询用）"""
-    global FETCH_STATUS_CACHE
-    status_file = OUTPUT_DIR / "fetch_status.json"
-    if status_file.exists():
-        try:
-            import json
-
-            data = json.loads(status_file.read_text(encoding="utf-8"))
-            status_file.unlink(missing_ok=True)  # 读取后删除，表示已消费
-            FETCH_STATUS_CACHE = data
-            FETCH_STATUS_CACHE["pending"] = False
-            return JSONResponse(content=data)
-        except Exception:
-            pass
-    return JSONResponse(content=FETCH_STATUS_CACHE)
-
-
 # ─── Action API ──────────────────────────────────────────
 
 
@@ -561,20 +593,26 @@ async def get_fetch_status():
 async def api_fetch(
     keyword: str = Form(""),
     arxiv_cats: str = Form(""),
-    max_results: int = Form(20)
+    max_results: int = Form(20),
+    mode: str = Form("incremental"),
 ):
-    """后台抓取"""
+    """后台抓取
+
+    Args:
+        keyword: 指定关键词，留空则使用所有活跃关键词
+        arxiv_cats: 逗号分隔的 Arxiv 分类
+        max_results: 每关键词最大结果数
+        mode: 抓取模式 — "incremental"（增量，使用 lookback_days）或 "historical"（全量历史，按相关性排序）
+    """
     if not _db_conn or not _settings:
         raise HTTPException(status_code=500, detail="Not initialized")
 
-    asyncio.create_task(_do_fetch_safe(keyword, arxiv_cats, max_results))
+    asyncio.create_task(_do_fetch_safe(keyword, arxiv_cats, max_results, mode))
     _log(
         "info",
-        f"Fetch triggered: keyword={keyword}, cats={arxiv_cats}, max={max_results}",
+        f"Fetch triggered: keyword={keyword}, cats={arxiv_cats}, max={max_results}, mode={mode}",
     )
-    return JSONResponse(
-        content={"status": "ok", "message": "Fetch started in background"}
-    )
+    return JSONResponse(content={"status": "ok", "message": "Fetch started in background"})
 
 
 @app.get("/api/search-db")
@@ -600,10 +638,10 @@ async def api_search(q: str = "", max: int = 20, cats: str = ""):
     """搜索 Arxiv 并返回结果列表"""
     if not q.strip():
         return JSONResponse(content={"papers": []})
-    from src.network.arxiv import search_arxiv
+    from src.network.factory import get_source
 
     categories = [c.strip() for c in cats.split(",") if c.strip()] if cats else None
-    papers = await search_arxiv(q.strip(), min(max, 100), categories)
+    papers = await get_source(_settings).search(q.strip(), min(max, 100), categories)
     return JSONResponse(content={"papers": papers, "count": len(papers)})
 
 
@@ -633,13 +671,13 @@ async def _do_import_papers(arxiv_ids: list[str]):
 
     from src.agents import PaperScorer
     from src.db import exists, insert_paper, update_paper_summary
-    from src.network.arxiv import fetch_by_ids
+    from src.network.factory import get_source
 
     today = datetime.date.today().isoformat()
     print(f"  [i] Importing {len(arxiv_ids)} papers by ID...")
 
     try:
-        papers = await fetch_by_ids(arxiv_ids)
+        papers = await get_source(_settings).fetch_by_ids(arxiv_ids)
     except Exception as e:
         print(f"  [!] Failed to fetch papers: {e}")
         return
@@ -698,14 +736,8 @@ async def _do_import_papers(arxiv_ids: list[str]):
     await _refresh_snapshot()
     await _refresh_notes_index()
 
-    # 写抓取状态
-    import json
-
+    # 通过 SSE 推送导入结果
     result_data = {"fetched": len(papers), "new": len(new_papers)}
-    status_file = OUTPUT_DIR / "fetch_status.json"
-    status_file.write_text(json.dumps(result_data), encoding="utf-8")
-    global FETCH_STATUS_CACHE
-    FETCH_STATUS_CACHE = result_data
     _notify_sse_clients(result_data)
     print(f"  [OK] Import done: {len(papers)} papers, {len(new_papers)} new")
 
@@ -721,135 +753,41 @@ async def _do_import_papers_safe(arxiv_ids: list[str]):
         _notify_sse_clients({"fetched": 0, "new": 0, "error": str(e)})
 
 
-async def _do_fetch(
-    keyword: str, arxiv_cats: str, max_results: int
-):
+async def _do_fetch(keyword: str, arxiv_cats: str, max_results: int, mode: str = "incremental"):
     """后台执行抓取"""
-    import datetime
-
-    from src.agents import PaperScorer
     from src.config import get_active_keywords
-    from src.db import (exists, get_keyword_paper_count, insert_paper,
-                        update_paper_summary)
-    from src.network.arxiv import fetch_all
+    from src.network.fetch_pipeline import run_fetch_pipeline
 
-    today = datetime.date.today().isoformat()
-
-    global FETCH_STATUS_CACHE
-    FETCH_STATUS_CACHE["pending"] = True
-
-    per_keyword_max_results = {}
     if keyword:
-        cats = (
-            [c.strip() for c in arxiv_cats.split(",") if c.strip()]
-            if arxiv_cats
-            else None
-        )
+        cats = [c.strip() for c in arxiv_cats.split(",") if c.strip()] if arxiv_cats else None
         kws = [
             {
                 "keyword": keyword,
                 "arxiv_cats": cats,
-                "max_results": max_results,
                 "active": True,
             }
         ]
-        per_keyword_max_results[keyword] = max_results
     else:
         kws = get_active_keywords()
-        target_new = _settings.arxiv.target_new_per_keyword
-        for kw in kws:
-            existing = get_keyword_paper_count(_db_conn, kw["keyword"])
-            desired = existing + target_new
-            capped = min(desired, 500)
-            per_keyword_max_results[kw["keyword"]] = capped
 
     if not kws:
         print("  [!] No keywords for background fetch")
         return
 
-    papers, _total_fetched, _duplicate_count = await fetch_all(
-        kws, _settings, per_keyword_max_results=per_keyword_max_results
-    )
-    new_papers = []
-    for p in papers:
-        if not exists(_db_conn, p["arxiv_id"]):
-            p["fetch_date"] = today
-            insert_paper(_db_conn, p)
-            new_papers.append(p)
+    result = await run_fetch_pipeline(_db_conn, _settings, kws, max_results, mode=mode)
 
-    api_key = _settings.llm.api_key
-    scorer = PaperScorer(
-        api_key=api_key,
-        api_base=_settings.llm.api_base,
-        model=_settings.llm.model,
-        temperature=_settings.llm.temperature,
-        max_tokens=_settings.llm.max_tokens,
-    )
-    if new_papers:
-        if api_key:
-            results = await scorer.score_batch_async(new_papers)
-            for paper, result in zip(new_papers, results, strict=False):
-                if result:
-                    update_paper_summary(
-                        _db_conn,
-                        paper["arxiv_id"],
-                        result.summary,
-                        result.remark,
-                        result.reason,
-                        result.score,
-                    )
-        else:
-            loop = asyncio.get_running_loop()
-            for paper in new_papers:
-                result = await loop.run_in_executor(
-                    None,
-                    scorer.score,
-                    paper.get("title", ""),
-                    paper.get("abstract", ""),
-                )
-                if result:
-                    update_paper_summary(
-                        _db_conn,
-                        paper["arxiv_id"],
-                        result.summary,
-                        result.remark,
-                        result.reason,
-                        result.score,
-                    )
-
-    await _refresh_snapshot()
-    await _refresh_notes_index()
-
-    # 记录抓取日志
-    from src.db import insert_fetch_log
-
-    insert_fetch_log(
-        _db_conn,
-        keywords_used=len(kws),
-        papers_fetched=len(papers),
-        papers_new=len(new_papers),
-        papers_updated=0,
-        papers_summarized=len(new_papers),
-        status="success",
-    )
-
-    # 写抓取状态供前端轮询
-    import json
-
-    result_data = {"fetched": len(papers), "new": len(new_papers)}
-    status_file = OUTPUT_DIR / "fetch_status.json"
-    status_file.write_text(json.dumps(result_data), encoding="utf-8")
-    FETCH_STATUS_CACHE = result_data
+    # 通过 SSE 推送抓取结果
+    result_data = {"fetched": result["fetched"], "new": result["new"]}
     _notify_sse_clients(result_data)
-    print(f"  [OK] Background fetch done: {len(papers)} fetched, {len(new_papers)} new")
+    print(f"  [OK] Background fetch done: {result['fetched']} fetched, {result['new']} new")
 
 
 async def _do_fetch_safe(
-    keyword: str, arxiv_cats: str, max_results: int
+    keyword: str, arxiv_cats: str, max_results: int, mode: str = "incremental"
 ):
     """带错误保护的 _do_fetch 包装"""
     try:
-        await _do_fetch(keyword, arxiv_cats, max_results)
+        await _do_fetch(keyword, arxiv_cats, max_results, mode)
     except Exception as e:
         import traceback
 
@@ -933,9 +871,7 @@ async def _refresh_notes_index():
         if _db_conn:
             papers = [
                 dict(r)
-                for r in _db_conn.execute(
-                    "SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500"
-                )
+                for r in _db_conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500")
             ]
             generate_notes_index_html(papers, OUTPUT_DIR)
     except Exception as e:

@@ -29,11 +29,21 @@ def main():
     # fetch
     fetch_parser = subparsers.add_parser("fetch", help="抓取 Arxiv 论文并生成摘要")
     fetch_parser.add_argument("--keyword", "-k", help="仅抓取指定关键词")
+    fetch_parser.add_argument("--dry-run", action="store_true", help="预览模式，不实际写入")
+    fetch_parser.add_argument("--serve", "-s", action="store_true", help="抓取后自动启动 Web 服务")
     fetch_parser.add_argument(
-        "--dry-run", action="store_true", help="预览模式，不实际写入"
+        "--mode",
+        "-m",
+        choices=["incremental", "historical"],
+        default="incremental",
+        help="抓取模式: incremental（增量，最近 lookback_days 天）或 historical（历史全量，按相关性排序），默认 incremental",
     )
     fetch_parser.add_argument(
-        "--serve", "-s", action="store_true", help="抓取后自动启动 Web 服务"
+        "--max-results", 
+        "-n",
+        type=int,
+        default=0,
+        help="每个关键词抓取的最大论文数，0 表示使用配置中的 target_new_per_keyword",
     )
 
     # serve
@@ -45,9 +55,7 @@ def main():
     review_group.add_argument(
         "--head", "-n", type=int, default=10, help="显示待审核论文数量，默认 10 篇"
     )
-    review_group.add_argument(
-        "--all", "-a", action="store_true", help="显示所有待审核论文"
-    )
+    review_group.add_argument("--all", "-a", action="store_true", help="显示所有待审核论文")
 
     # mark
     mark_parser = subparsers.add_parser("mark", help="标记论文")
@@ -67,9 +75,7 @@ def main():
     # list
     list_parser = subparsers.add_parser("list", help="列出论文")
     list_parser.add_argument("--keyword", "-k", help="按关键词筛选")
-    list_parser.add_argument(
-        "--status", "-s", choices=["summarized", "marked"], help="按状态筛选"
-    )
+    list_parser.add_argument("--status", "-s", choices=["summarized", "marked"], help="按状态筛选")
     list_parser.add_argument(
         "--mark",
         "-m",
@@ -84,9 +90,7 @@ def main():
         help="排序方式， date 和 score 分别表示按日期和评分降序, rdate 和 rscore 分别表示按日期和评分升序, 默认为按日期降序",
     )
     list_group = list_parser.add_mutually_exclusive_group()
-    list_group.add_argument(
-        "--head", "-n", type=int, default=10, help="显示论文数量，默认 10 篇"
-    )
+    list_group.add_argument("--head", "-n", type=int, default=10, help="显示论文数量，默认 10 篇")
     list_group.add_argument("--all", "-a", action="store_true", help="显示所有论文")
 
     # status

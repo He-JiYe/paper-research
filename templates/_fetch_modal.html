@@ -27,6 +27,17 @@
             </div>
             <label style="font-size:13px;color:#555;">结果数量</label>
             <input id="fetch-max" type="number" value="20" min="5" max="100" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;margin:4px 0 12px;font-size:14px;">
+            <label style="font-size:13px;color:#555;">抓取模式</label>
+            <div style="margin:4px 0 12px;display:flex;gap:12px;">
+                <label style="cursor:pointer;font-size:14px;">
+                    <input type="radio" name="fetch-mode" value="incremental" checked onchange="toggleFetchModeHint()">
+                    增量模式 — 最近 <span id="fetch-lb-days">7</span> 天内的最新论文
+                </label>
+                <label style="cursor:pointer;font-size:14px;">
+                    <input type="radio" name="fetch-mode" value="historical" onchange="toggleFetchModeHint()">
+                    历史模式 — 全量按相关性排序
+                </label>
+            </div>
             <div style="display:flex;gap:8px;">
                 <button onclick="doFetch()" style="flex:1;background:#667eea;color:white;border:none;padding:8px;border-radius:4px;cursor:pointer;font-size:14px;">开始抓取</button>
                 <button onclick="closeFetchModal()" style="background:#ecf0f1;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:14px;">关闭</button>
@@ -69,6 +80,18 @@
                                style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:14px;">
                     </div>
                 </div>
+                <!-- 抓取模式选择 -->
+                    <label style="font-size:12px;color:#555;">抓取模式</label>
+                    <div style="margin:6px 0 0;display:flex;gap:16px;">
+                        <label style="cursor:pointer;font-size:14px;">
+                            <input type="radio" name="config-fetch-mode" value="incremental" checked>
+                            增量模式 — 最近 <span id="cfg-lb-days">7</span> 天内
+                        </label>
+                        <label style="cursor:pointer;font-size:14px;">
+                            <input type="radio" name="config-fetch-mode" value="historical">
+                            历史模式 — 全量按相关性排序
+                        </label>
+                    </div>
             </div>
             <div style="display:flex;gap:8px;margin-bottom:12px;">
                 <input id="kw-new-keyword" style="flex:2;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:14px;"

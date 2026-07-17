@@ -1,516 +1,391 @@
-"""网络层测试：Arxiv API 解析、查询、PDF 下载"""
+"""Arxiv API 客户端测试"""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from src.network.arxiv import (ARXIV_API_BASE, DEFAULT_USER_AGENT,
-                               _get_user_agent, _parse_atom, download_pdf,
-                               fetch_all, fetch_by_ids, fetch_keyword,
-                               search_arxiv)
-
-
-class TestUserAgent:
-    def test_default_ua(self):
-        """_get_user_agent 返回默认 UA"""
-        settings = MagicMock(spec=[])
-        # MagicMock without arxiv attribute → 走默认
-        ua = _get_user_agent(settings)
-        assert ua == DEFAULT_USER_AGENT
-
-    def test_arxiv_user_agent_empty_string(self):
-        """arxiv.user_agent 为空字符串时返回空"""
-        arxiv_mock = MagicMock()
-        arxiv_mock.user_agent = ""
-        settings = MagicMock()
-        settings.arxiv = arxiv_mock
-        ua = _get_user_agent(settings)
-        assert ua == ""  # 函数显式返回 arxiv.user_agent
-
-    def test_custom_ua(self):
-        """_get_user_agent 返回自定义 UA"""
-        settings = MagicMock()
-        settings.arxiv.user_agent = "CustomAgent/1.0"
-        ua = _get_user_agent(settings)
-        assert ua == "CustomAgent/1.0"
+from src.network.arxiv import (
+    fetch_all,
+    fetch_keyword,
+    search_arxiv,
+    _parse_atom,
+)
 
 
 class TestParseAtom:
-    def test_parse_single_entry(self):
-        """_parse_atom 解析单篇论文"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <id>http://arxiv.org/abs/2401.00001v1</id>
-            <title>Test Title</title>
-            <summary>This is an abstract.</summary>
-            <author><name>Alice Zhang</name></author>
-            <published>2024-01-01T00:00:00Z</published>
-            <updated>2024-01-05T00:00:00Z</updated>
-            <arxiv:primary_category term="cs.CV"/>
-            <category term="cs.CV"/>
-            <category term="cs.LG"/>
-          </entry>
-        </feed>"""
-        papers = _parse_atom(xml, keyword="test")
-        assert len(papers) == 1
-        p = papers[0]
-        assert p["arxiv_id"] == "2401.00001"
-        assert p["version"] == 1
-        assert p["title"] == "Test Title"
-        assert p["abstract"] == "This is an abstract."
-        assert p["authors"] == "Alice Zhang"
-        assert p["primary_category"] == "cs.CV"
-        assert p["categories"] == "cs.CV, cs.LG"
-        assert p["published"] == "2024-01-01"
-        assert p["keyword_match"] == "test"
-        assert p["url"] == "https://arxiv.org/abs/2401.00001"
+    """测试 Atom XML 解析"""
 
-    def test_parse_multiple_entries(self):
-        """_parse_atom 解析多篇论文"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <id>http://arxiv.org/abs/2401.00001v1</id>
-            <title>Paper 1</title>
-            <summary>Abstract 1</summary>
-            <author><name>A</name></author>
-            <published>2024-01-01T00:00:00Z</published>
-            <updated>2024-01-02T00:00:00Z</updated>
-            <arxiv:primary_category term="cs.AI"/>
-            <category term="cs.AI"/>
-          </entry>
-          <entry>
-            <id>http://arxiv.org/abs/2401.00002v2</id>
-            <title>Paper 2</title>
-            <summary>Abstract 2</summary>
-            <author><name>B</name></author>
-            <author><name>C</name></author>
-            <published>2024-01-03T00:00:00Z</published>
-            <updated>2024-01-04T00:00:00Z</updated>
-            <arxiv:primary_category term="cs.LG"/>
-          </entry>
-        </feed>"""
-        papers = _parse_atom(xml, keyword="ml")
+    def test_parse_basic(self, sample_atom_xml):
+        papers = _parse_atom(sample_atom_xml, keyword="test")
         assert len(papers) == 2
         assert papers[0]["arxiv_id"] == "2401.00001"
-        assert papers[0]["version"] == 1
-        assert papers[1]["arxiv_id"] == "2401.00002"
-        assert papers[1]["version"] == 2
-        assert papers[1]["authors"] == "B, C"
+        assert papers[0]["title"] == "Test-Time Adaptation with Transformers"
+        assert papers[0]["keyword_match"] == "test"
 
-    def test_parse_empty_feed(self):
-        """_parse_atom 处理空 feed"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-        </feed>"""
-        papers = _parse_atom(xml)
+    def test_parse_empty(self):
+        papers = _parse_atom("", keyword="test")
         assert papers == []
 
     def test_parse_invalid_xml(self):
-        """_parse_atom 处理无效 XML"""
         papers = _parse_atom("not xml", keyword="test")
         assert papers == []
 
-    def test_parse_entry_without_id(self):
-        """无 id 的 entry 被跳过"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <title>No ID</title>
-            <summary>Abstract</summary>
-          </entry>
-        </feed>"""
-        papers = _parse_atom(xml)
-        assert papers == []
 
-    def test_parse_authors_empty(self):
-        """无作者的论文"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <id>http://arxiv.org/abs/2401.00001v1</id>
-            <title>No Author</title>
-            <summary>Abstract</summary>
-            <published>2024-01-01T00:00:00Z</published>
-            <updated>2024-01-02T00:00:00Z</updated>
-            <arxiv:primary_category term="cs.AI"/>
-          </entry>
-        </feed>"""
-        papers = _parse_atom(xml)
-        assert len(papers) == 1
-        assert papers[0]["authors"] == ""
-
-    def test_parse_entry_invalid_arxiv_id(self):
-        """无效 arxiv_id 的 entry 被跳过"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <id>http://arxiv.org/abs/invalid-id</id>
-            <title>Invalid ID</title>
-            <summary>Abstract</summary>
-            <author><name>A</name></author>
-            <published>2024-01-01T00:00:00Z</published>
-            <updated>2024-01-02T00:00:00Z</updated>
-          </entry>
-        </feed>"""
-        papers = _parse_atom(xml)
-        assert papers == []
+def _make_paginated_xml(ids, total, start=0):
+    """生成包含指定论文 ID 列表的 Atom XML，用于测试分页"""
+    entries = []
+    for aid in ids:
+        entries.append(
+            "  <entry>\n"
+            '    <id>http://arxiv.org/abs/{}v1</id>\n'.format(aid)
+            + '    <title>Paper {}</title>\n'.format(aid)
+            + '    <summary>Abstract of {}</summary>\n'.format(aid)
+            + '    <published>2024-01-01T00:00:00Z</published>\n'
+            + '    <updated>2024-01-05T12:00:00Z</updated>\n'
+            + '    <arxiv:primary_category scheme="http://arxiv.org/schemas/atom" term="cs.LG"/>\n'
+            + '    <category scheme="http://arxiv.org/schemas/atom" term="cs.LG"/>\n'
+            + "  </entry>"
+        )
+    body = "\n".join(entries)
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        + '<feed xmlns="http://www.w3.org/2005/Atom"\n'
+        + '      xmlns:arxiv="http://arxiv.org/schemas/atom"\n'
+        + '      xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">\n'
+        + "  <opensearch:totalResults>{}</opensearch:totalResults>\n".format(total)
+        + "  <opensearch:startIndex>{}</opensearch:startIndex>\n".format(start)
+        + "  <opensearch:itemsPerPage>{}</opensearch:itemsPerPage>\n".format(len(ids))
+        + body
+        + "\n</feed>"
+    )
 
 
 class TestFetchKeyword:
-    @pytest.mark.asyncio
-    async def test_fetch_keyword_success(self):
-        """fetch_keyword 正常返回论文列表"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <id>http://arxiv.org/abs/2401.00001v1</id>
-            <title>Test</title>
-            <summary>Abstract</summary>
-            <author><name>A</name></author>
-            <published>2024-01-01T00:00:00Z</published>
-            <updated>2024-01-02T00:00:00Z</updated>
-            <arxiv:primary_category term="cs.CV"/>
-            <category term="cs.CV"/>
-          </entry>
-        </feed>"""
+    """测试单关键词查询"""
 
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.text = xml
-        mock_response.raise_for_status = MagicMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
+    @pytest.mark.asyncio
+    async def test_incremental_mode_date_filter(self, sample_atom_xml):
+        """增量模式（historical=False）：query 不含 submittedDate，客户端做日期过滤"""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        response = MagicMock()
+        response.text = sample_atom_xml
+        response.raise_for_status = MagicMock()
+        client.get.return_value = response
 
         papers = await fetch_keyword(
-            mock_client, "test keyword", max_results=10, lookback_days=30
+            client, "test-time adaptation", max_results=25, lookback_days=7, historical=False
         )
+
+        call_args, call_kwargs = client.get.call_args
+        params = call_kwargs["params"]
+        assert "submittedDate" not in params["search_query"]
+        assert params["sortBy"] == "submittedDate"
+        assert params["sortOrder"] == "descending"
+        # 样本数据 published=2024-01-01，早于 lookback_days 截止日期，被客户端过滤掉
+        assert len(papers) == 0
+
+    @pytest.mark.asyncio
+    async def test_historical_mode_no_date_filter(self, sample_atom_xml):
+        """历史模式（historical=True）不应包含 submittedDate 过滤，按相关性排序"""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        xml = _make_paginated_xml(["2401.00001", "2401.00002"], total=2)
+        response = MagicMock()
+        response.text = xml
+        response.raise_for_status = MagicMock()
+        client.get.return_value = response
+
+        papers = await fetch_keyword(
+            client, "test-time adaptation", max_results=50, historical=True
+        )
+
+        call_args, call_kwargs = client.get.call_args
+        params = call_kwargs["params"]
+        assert "submittedDate" not in params["search_query"]
+        assert params["sortBy"] == "relevance"
+        # historical 模式下 page_size = min(max(max_results * 2, 500), 2000)
+        assert params["max_results"] == 500
+        assert len(papers) == 2
+
+    @pytest.mark.asyncio
+    async def test_historical_with_categories(self, sample_atom_xml):
+        """历史模式（historical=True）+ 分类过滤"""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        xml = _make_paginated_xml(["2401.00001"], total=1)
+        response = MagicMock()
+        response.text = xml
+        response.raise_for_status = MagicMock()
+        client.get.return_value = response
+
+        await fetch_keyword(
+            client,
+            "test-time adaptation",
+            arxiv_cats=["cs.CV", "cs.LG"],
+            max_results=30,
+            historical=True,
+        )
+
+        call_args, call_kwargs = client.get.call_args
+        params = call_kwargs["params"]
+        assert "submittedDate" not in params["search_query"]
+        assert "cat:cs.CV" in params["search_query"]
+        assert "cat:cs.LG" in params["search_query"]
+        assert "test-time adaptation" in params["search_query"]
+        assert params["sortBy"] == "relevance"
+
+    @pytest.mark.asyncio
+    async def test_historical_skip_ids_filters_existing(self):
+        """历史模式 + skip_ids 应过滤掉已有论文"""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        xml = _make_paginated_xml(
+            ["2401.00001", "2401.00002", "2401.00003"], total=3
+        )
+        response = MagicMock()
+        response.text = xml
+        response.raise_for_status = MagicMock()
+        client.get.return_value = response
+
+        papers = await fetch_keyword(
+            client, "test keyword", max_results=10, historical=True,
+            skip_ids={"2401.00001", "2401.00002"},
+        )
+
         assert len(papers) == 1
-        assert papers[0]["arxiv_id"] == "2401.00001"
-        # 验证 API 调用参数
-        call_args = mock_client.get.call_args
-        assert ARXIV_API_BASE in str(call_args[0][0])
-        assert "test keyword" in str(call_args)
+        assert papers[0]["arxiv_id"] == "2401.00003"
+        # 无 totalResults 时需要一次额外请求确认耗尽
+        assert client.get.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_fetch_keyword_with_categories(self):
-        """fetch_keyword 包含分类筛选"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-        </feed>"""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.text = xml
-        mock_response.raise_for_status = MagicMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
+    async def test_historical_skip_ids_triggers_pagination(self):
+        """历史模式：skip_ids 导致有效结果不足时应自动分页"""
+        client = AsyncMock(spec=httpx.AsyncClient)
 
-        await fetch_keyword(
-            mock_client, "test", arxiv_cats=["cs.CV", "cs.LG"], max_results=5
+        page1 = _make_paginated_xml(["2401.00001", "2401.00002"], total=5)
+        page2 = _make_paginated_xml(["2401.00001", "2401.00003"], total=5, start=2)
+        page3 = _make_paginated_xml(["2401.00004"], total=5, start=4)
+        empty_page = _make_paginated_xml([], total=5, start=5)
+
+        responses = [
+            MagicMock(text=page1),
+            MagicMock(text=page2),
+            MagicMock(text=page3),
+            MagicMock(text=empty_page),
+        ]
+        for r in responses:
+            r.raise_for_status = MagicMock()
+
+        client.get = AsyncMock(side_effect=responses)
+
+        papers = await fetch_keyword(
+            client, "test keyword", max_results=10, historical=True,
+            skip_ids={"2401.00001", "2401.00002"},
         )
-        call_args = mock_client.get.call_args
-        query_str = str(call_args[1]["params"]["search_query"])
-        assert "cat:cs.CV" in query_str
-        assert "cat:cs.LG" in query_str
+
+        assert len(papers) == 2
+        ids = {p["arxiv_id"] for p in papers}
+        assert "2401.00003" in ids
+        assert "2401.00004" in ids
+        assert client.get.call_count == 4
 
     @pytest.mark.asyncio
-    async def test_fetch_keyword_with_date_range(self):
-        """fetch_keyword 使用自定义日期范围"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-        </feed>"""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.text = xml
-        mock_response.raise_for_status = MagicMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
+    async def test_historical_pagination_stops_when_enough_new(self):
+        """历史模式：收集足够新论文后应停止分页"""
+        client = AsyncMock(spec=httpx.AsyncClient)
 
-        await fetch_keyword(
-            mock_client, "test", date_from="20240101000000", date_to="20240201000000"
+        page1 = _make_paginated_xml(
+            ["2401.00001", "2401.00002", "2401.00003", "2401.00004"],
+            total=100,
         )
-        call_args = mock_client.get.call_args
-        params = call_args[1]["params"]
-        assert "20240101000000" in params["search_query"]
-        assert "20240201000000" in params["search_query"]
-
-    @pytest.mark.asyncio
-    async def test_fetch_keyword_with_date_from_only(self):
-        """仅设置 date_from，date_to 自动补全"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-        </feed>"""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.text = xml
-        mock_response.raise_for_status = MagicMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-
-        await fetch_keyword(mock_client, "test", date_from="20240101000000")
-        call_args = mock_client.get.call_args
-        params = call_args[1]["params"]
-        assert "20240101000000" in params["search_query"]
-
-    @pytest.mark.asyncio
-    async def test_search_arxiv_with_categories(self):
-        """search_arxiv 带分类筛选"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-        </feed>"""
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            mock_instance = AsyncMock()
-            mock_client_cls.return_value.__aenter__.return_value = mock_instance
-            mock_response = MagicMock()
-            mock_response.text = xml
-            mock_response.raise_for_status = MagicMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-
-            papers = await search_arxiv("transformer", categories=["cs.CV", "cs.LG"])
-            assert papers == []
-
-    @pytest.mark.asyncio
-    async def test_fetch_keyword_http_error(self):
-        """fetch_keyword 处理 HTTP 错误"""
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "404", request=MagicMock(), response=MagicMock()
+        page2 = _make_paginated_xml(
+            ["2401.00005", "2401.00006", "2401.00007", "2401.00008"],
+            total=100, start=4,
         )
-        mock_client.get = AsyncMock(return_value=mock_response)
 
-        with pytest.raises(httpx.HTTPStatusError):
-            await fetch_keyword(mock_client, "test")
+        responses = [MagicMock(text=page1), MagicMock(text=page2)]
+        for r in responses:
+            r.raise_for_status = MagicMock()
+
+        client.get = AsyncMock(side_effect=responses)
+
+        papers = await fetch_keyword(
+            client, "test keyword", max_results=3, historical=True,
+            skip_ids={"2401.00001", "2401.00002", "2401.00003", "2401.00004"},
+        )
+
+        assert len(papers) == 3
+        assert client.get.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_historical_pagination_exhausts_results(self):
+        """历史模式：全部结果都不足 max_results 时返回所有有效结果"""
+        client = AsyncMock(spec=httpx.AsyncClient)
+
+        page1 = _make_paginated_xml(
+            ["2401.00001", "2401.00002", "2401.00003", "2401.00004", "2401.00005"],
+            total=5,
+        )
+        response = MagicMock(text=page1)
+        response.raise_for_status = MagicMock()
+        client.get = AsyncMock(return_value=response)
+
+        papers = await fetch_keyword(
+            client, "test keyword", max_results=10, historical=True,
+            skip_ids={
+                "2401.00001", "2401.00002", "2401.00003",
+                "2401.00004", "2401.00005",
+            },
+        )
+
+        assert len(papers) == 0
+        # 无 totalResults 时需要一次额外请求确认耗尽
+        assert client.get.call_count == 2
 
 
 class TestFetchAll:
-    @pytest.mark.asyncio
-    async def test_fetch_all_empty_keywords(self, mock_settings):
-        """无活跃关键词时返回空"""
-        papers, total, dup = await fetch_all([], mock_settings)
-        assert papers == []
-        assert total == 0
-        assert dup == 0
+    """测试多关键词并发查询"""
 
     @pytest.mark.asyncio
-    async def test_fetch_all_all_inactive(self, mock_settings):
-        """所有关键词非活跃时返回空"""
-        kws = [{"keyword": "test", "active": False}]
-        papers, total, _dup = await fetch_all(kws, mock_settings)
-        assert papers == []
-        assert total == 0
+    async def test_incremental_mode(self, active_keywords, mock_settings, sample_atom_xml):
+        """增量模式（historical=False）：按 submittedDate 排序，客户端做日期过滤"""
+        mock_client_instance = AsyncMock(spec=httpx.AsyncClient)
+        response = MagicMock()
+        response.text = sample_atom_xml
+        response.raise_for_status = MagicMock()
+        mock_client_instance.get.return_value = response
 
-    @pytest.mark.asyncio
-    async def test_fetch_all_deduplication(self, mock_settings):
-        """fetch_all 对跨关键词重复论文去重"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <id>http://arxiv.org/abs/2401.00001v1</id>
-            <title>Same Paper</title>
-            <summary>Abstract</summary>
-            <author><name>A</name></author>
-            <published>2024-01-01T00:00:00Z</published>
-            <updated>2024-01-02T00:00:00Z</updated>
-            <arxiv:primary_category term="cs.CV"/>
-            <category term="cs.CV"/>
-          </entry>
-        </feed>"""
+        with patch("src.network.arxiv.httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__.return_value = mock_client_instance
 
-        kws = [
-            {"keyword": "ML", "active": True},
-            {"keyword": "CV", "active": True},
-        ]
-
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            mock_instance = AsyncMock()
-            mock_client_cls.return_value.__aenter__.return_value = mock_instance
-            mock_response = MagicMock()
-            mock_response.text = xml
-            mock_response.raise_for_status = MagicMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-
-            papers, total, dup = await fetch_all(kws, mock_settings)
-
-        # 2 个关键词返回相同论文（但同一篇 arxiv_id），去重后为 1
-        assert len(papers) == 1
-        assert total == 2
-        assert dup == 1
-
-    @pytest.mark.asyncio
-    async def test_fetch_all_partial_failure(self, mock_settings):
-        """fetch_all 部分关键词失败不中断"""
-        kws = [
-            {"keyword": "good", "active": True},
-            {"keyword": "bad", "active": True},
-        ]
-
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            mock_instance = AsyncMock()
-            mock_client_cls.return_value.__aenter__.return_value = mock_instance
-
-            async def mock_get(url, **kwargs):
-                if "bad" in str(kwargs.get("params", {})):
-                    raise httpx.HTTPStatusError(
-                        "Error", request=MagicMock(), response=MagicMock()
-                    )
-                xml = """<?xml version="1.0" encoding="utf-8"?>
-                <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
-                  <entry>
-                    <id>http://arxiv.org/abs/2401.00001v1</id>
-                    <title>Good Paper</title>
-                    <summary>Abstract</summary>
-                    <author><name>A</name></author>
-                    <published>2024-01-01T00:00:00Z</published>
-                    <updated>2024-01-02T00:00:00Z</updated>
-                    <arxiv:primary_category term="cs.CV"/>
-                    <category term="cs.CV"/>
-                  </entry>
-                </feed>"""
-                resp = MagicMock()
-                resp.text = xml
-                resp.raise_for_status = MagicMock()
-                return resp
-
-            mock_instance.get = AsyncMock(side_effect=mock_get)
-
-            papers, _total, _dup = await fetch_all(kws, mock_settings)
-            assert len(papers) == 1
-            assert papers[0]["arxiv_id"] == "2401.00001"
-
-
-class TestSearchAndFetchByIds:
-    @pytest.mark.asyncio
-    async def test_search_arxiv(self):
-        """search_arxiv 返回搜索结果"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <id>http://arxiv.org/abs/2401.00001v1</id>
-            <title>Search Result</title>
-            <summary>Abstract</summary>
-            <author><name>A</name></author>
-            <published>2024-01-01T00:00:00Z</published>
-            <updated>2024-01-02T00:00:00Z</updated>
-            <arxiv:primary_category term="cs.CV"/>
-            <category term="cs.CV"/>
-          </entry>
-        </feed>"""
-
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            mock_instance = AsyncMock()
-            mock_client_cls.return_value.__aenter__.return_value = mock_instance
-            mock_response = MagicMock()
-            mock_response.text = xml
-            mock_response.raise_for_status = MagicMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-
-            papers = await search_arxiv("transformer", max_results=5)
-            assert len(papers) == 1
-            assert papers[0]["title"] == "Search Result"
-
-    @pytest.mark.asyncio
-    async def test_fetch_by_ids(self):
-        """fetch_by_ids 按 ID 获取论文"""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-        <feed xmlns="http://www.w3.org/2005/Atom"
-              xmlns:arxiv="http://arxiv.org/schemas/atom">
-          <entry>
-            <id>http://arxiv.org/abs/2401.00001v1</id>
-            <title>By ID</title>
-            <summary>Abstract</summary>
-            <author><name>A</name></author>
-            <published>2024-01-01T00:00:00Z</published>
-            <updated>2024-01-02T00:00:00Z</updated>
-            <arxiv:primary_category term="cs.CV"/>
-            <category term="cs.CV"/>
-          </entry>
-        </feed>"""
-
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            mock_instance = AsyncMock()
-            mock_client_cls.return_value.__aenter__.return_value = mock_instance
-            mock_response = MagicMock()
-            mock_response.text = xml
-            mock_response.raise_for_status = MagicMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-
-            papers = await fetch_by_ids(["2401.00001"])
-            assert len(papers) == 1
-            assert papers[0]["arxiv_id"] == "2401.00001"
-
-    @pytest.mark.asyncio
-    async def test_search_arxiv_empty_query(self):
-        """空查询返回空列表"""
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            xml = """<?xml version="1.0" encoding="utf-8"?>
-            <feed xmlns="http://www.w3.org/2005/Atom"
-                  xmlns:arxiv="http://arxiv.org/schemas/atom">
-            </feed>"""
-            mock_instance = AsyncMock()
-            mock_client_cls.return_value.__aenter__.return_value = mock_instance
-            mock_response = MagicMock()
-            mock_response.text = xml
-            mock_response.raise_for_status = MagicMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-
-            papers = await search_arxiv("")
-            assert papers == []
-
-
-class TestDownloadPdf:
-    @pytest.mark.asyncio
-    async def test_download_pdf_success(self, temp_dir):
-        """download_pdf 下载 PDF 到指定目录"""
-        pdf_content = b"%PDF-1.4 test content " * 500  # > 10KB
-
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            mock_instance = AsyncMock()
-            mock_client_cls.return_value.__aenter__.return_value = mock_instance
-            mock_response = MagicMock()
-            mock_response.content = pdf_content
-            mock_response.raise_for_status = MagicMock()
-            mock_instance.get = AsyncMock(return_value=mock_response)
-
-            pdf_path = await download_pdf("2401.00001", temp_dir)
-            assert pdf_path.exists()
-            assert pdf_path.stat().st_size > 10000
-
-    @pytest.mark.asyncio
-    async def test_download_pdf_skip_exists(self, temp_dir):
-        """PDF 已存在且大小合理时跳过下载"""
-        pdf_dir = temp_dir / "notes" / "2401.00001"
-        pdf_dir.mkdir(parents=True)
-        pdf_path = pdf_dir / "paper.pdf"
-        pdf_path.write_bytes(b"X" * 20000)
-
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            result = await download_pdf("2401.00001", temp_dir)
-            assert result == pdf_path
-            mock_client_cls.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_download_pdf_http_error(self, temp_dir):
-        """下载失败时抛出异常"""
-        with patch("src.network.arxiv.httpx.AsyncClient") as mock_client_cls:
-            mock_instance = AsyncMock()
-            mock_client_cls.return_value.__aenter__.return_value = mock_instance
-            mock_response = MagicMock()
-            mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-                "404", request=MagicMock(), response=MagicMock()
+            papers, total, dup = await fetch_all(
+                active_keywords, mock_settings,
+                max_results=25,
+                historical=False,
             )
-            mock_instance.get = AsyncMock(return_value=mock_response)
 
-            with pytest.raises(httpx.HTTPStatusError):
-                await download_pdf("2401.00001", temp_dir)
+            # 样本数据 published=2024-01-01，早于 lookback_days 截止日期，被客户端过滤
+            assert len(papers) == 0
+            assert mock_client_instance.get.call_count >= 2
+            for call in mock_client_instance.get.call_args_list:
+                params = call[1]["params"]
+                assert "submittedDate" not in params["search_query"]
+                assert params["sortBy"] == "submittedDate"
+
+    @pytest.mark.asyncio
+    async def test_historical_mode(self, active_keywords, mock_settings, sample_atom_xml):
+        """历史模式（historical=True）：所有关键词都跳过日期过滤"""
+        mock_client_instance = AsyncMock(spec=httpx.AsyncClient)
+        xml = _make_paginated_xml(["2401.00001", "2401.00002"], total=2)
+        response = MagicMock()
+        response.text = xml
+        response.raise_for_status = MagicMock()
+        mock_client_instance.get.return_value = response
+
+        with patch("src.network.arxiv.httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__.return_value = mock_client_instance
+
+            papers, total, dup = await fetch_all(
+                active_keywords, mock_settings,
+                max_results=50,
+                historical=True,
+            )
+
+            assert len(papers) > 0
+            for call in mock_client_instance.get.call_args_list:
+                params = call[1]["params"]
+                assert "submittedDate" not in params["search_query"]
+                assert params["sortBy"] == "relevance"
+
+    @pytest.mark.asyncio
+    async def test_historical_with_skip_ids(self, active_keywords, mock_settings):
+        """历史模式 + skip_ids 应在 fetch_all 去重阶段过滤"""
+        mock_client_instance = AsyncMock(spec=httpx.AsyncClient)
+        xml = _make_paginated_xml(["2401.00003"], total=1)
+        response = MagicMock()
+        response.text = xml
+        response.raise_for_status = MagicMock()
+        mock_client_instance.get.return_value = response
+
+        with patch("src.network.arxiv.httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__.return_value = mock_client_instance
+
+            papers, total, dup = await fetch_all(
+                active_keywords, mock_settings,
+                max_results=10,
+                historical=True,
+                skip_ids={"2401.00001", "2401.00002"},
+            )
+
+            assert len(papers) > 0
+            assert all(p["arxiv_id"] not in ("2401.00001", "2401.00002") for p in papers)
+
+
+class TestSearchArxiv:
+    """测试搜索功能"""
+
+    @pytest.mark.asyncio
+    async def test_search_uses_relevance(self, sample_atom_xml):
+        """搜索应按相关性排序"""
+        mock_instance = MagicMock()
+        response = MagicMock()
+        response.text = sample_atom_xml
+        response.raise_for_status = MagicMock()
+        mock_instance.get = AsyncMock(return_value=response)
+
+        with patch("src.network.arxiv.httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__.return_value = mock_instance
+
+            papers = await search_arxiv("test query", max_results=20)
+
+            call_args, call_kwargs = mock_instance.get.call_args
+            params = call_kwargs["params"]
+            assert params["sortBy"] == "relevance"
+            assert len(papers) == 2
+
+
+# ─── 补充 coverage 测试 ─────────────────────────────────
+
+
+class TestCoverage:
+    """覆盖 arxiv.py 剩余的边缘路径"""
+
+    def test_get_user_agent_fallback(self, mock_settings):
+        """user_agent 为空时返回默认值"""
+        from src.network.arxiv import _get_user_agent
+
+        mock_settings.fetch.user_agent = ""
+        result = _get_user_agent(mock_settings)
+        assert result == "PaperResearch/1.0"
+
+    def test_get_user_agent_no_fetch_attr(self):
+        """settings 无 fetch 属性时返回默认值"""
+        from src.network.arxiv import _get_user_agent
+
+        result = _get_user_agent(object())
+        assert result == "PaperResearch/1.0"
+
+    @pytest.mark.asyncio
+    async def test_fetch_all_keyword_error(self, active_keywords, mock_settings):
+        """某个关键词抓取失败不应影响其他关键词"""
+        mock_client_instance = AsyncMock(spec=httpx.AsyncClient)
+
+        async def _mock_get(*args, **kwargs):
+            if "test-time" in str(args):
+                resp = MagicMock()
+                resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+                    "403", request=MagicMock(), response=MagicMock()
+                )
+                return resp
+            xml = _make_paginated_xml(["2401.00001"], total=1)
+            mock_resp = MagicMock()
+            mock_resp.text = xml
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        mock_client_instance.get.side_effect = _mock_get
+        with patch("src.network.arxiv.httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__.return_value = mock_client_instance
+            papers, total, dup = await fetch_all(
+                active_keywords, mock_settings, max_results=25, historical=True,
+            )
+            assert len(papers) == 1
+

@@ -254,8 +254,6 @@ def _find_caption(doc, page_num: int, xref, elem_type: str) -> str:
     }
 
     for pat in patterns.get(elem_type, []):
-        import re
-
         match = re.search(pat, text)
         if match:
             caption = match.group(0).strip()
@@ -278,8 +276,13 @@ class ParserAgent(BaseAgent):
         if self.max_tokens < 2000:
             self.max_tokens = 2000
 
-    async def parse(self, arxiv_id: str, output_dir: Path) -> dict:
+    async def parse(self, arxiv_id: str, output_dir: Path, settings=None) -> dict:
         """解析一篇论文的 PDF，返回结构化内容。
+
+        Args:
+            arxiv_id:    论文 ID
+            output_dir:  输出根目录
+            settings:    配置对象（用于数据源路由，为 None 时使用默认）
 
         Returns:
             {
@@ -289,10 +292,11 @@ class ParserAgent(BaseAgent):
                 "paper": {"arxiv_id", "title", ...}  # 基本元信息
             }
         """
-        from src.network.arxiv import download_pdf
+        from src.network.factory import get_source
 
         # 1. 下载 PDF（仅一次）
-        pdf_path = await download_pdf(arxiv_id, output_dir)
+        source = get_source(settings) if settings else get_source(None)
+        pdf_path = await source.download_pdf(arxiv_id, output_dir)
         note_dir = output_dir / "notes" / arxiv_id
         figures_dir = note_dir / "figures"
         tables_dir = note_dir / "tables"
@@ -333,7 +337,7 @@ class ParserAgent(BaseAgent):
             title=f"arxiv:{arxiv_id}",
             figures_list="\n".join(lines),
         )
-        content = self._call(
+        content = await self._call_async(
             system_prompt="You are a paper analysis assistant. Output valid JSON only.",
             user_prompt=prompt,
         )
@@ -363,7 +367,7 @@ class ParserAgent(BaseAgent):
             title=f"arxiv:{arxiv_id}",
             tables_list="\n".join(lines),
         )
-        content = self._call(
+        content = await self._call_async(
             system_prompt="You are a paper analysis assistant. Output valid JSON only.",
             user_prompt=prompt,
         )

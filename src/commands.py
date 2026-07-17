@@ -2,6 +2,8 @@
 
 import datetime
 import os
+import subprocess
+import sys
 import webbrowser
 
 from src.config import OUTPUT_DIR
@@ -10,21 +12,22 @@ from src.config import OUTPUT_DIR
 
 
 def cmd_fetch(args, settings, conn):
-    """抓取 Arxiv 论文 -> LLM 摘要 -> 生成 HTML -> 通知"""
+    """抓取 Arxiv 论文 -> LLM 摘要 -> 生成 HTML -> 通知
+
+    支持两种抓取模式:
+      - incremental（默认）: 获取最近 lookback_days 天内与关键词最相关的
+        target_new_per_keyword 篇论文，适合每日定时增量抓取
+      - historical: 从 Arxiv 全量数据中按相关性排序抓取指定数量的论文，
+        不受时间限制，适合首次建库或补充历史论文
+    """
     import asyncio
 
-    from src.agents import PaperScorer
     from src.config import get_active_keywords
-    from src.db import (get_keyword_paper_count, get_paper, get_stats,
-                        insert_fetch_log, insert_paper, touch_paper,
-                        update_paper_summary, update_paper_version)
-    from src.network.arxiv import fetch_all
-    from src.serve.renderer import (generate_landing_html,
-                                    generate_notes_index_html,
-                                    generate_summary_html)
+    from src.network.fetch_pipeline import run_fetch_pipeline
 
     today = datetime.date.today().isoformat()
-    print(f"[{today}] === Paper Research Fetch 开始 ===")
+    mode = getattr(args, "mode", "incremental")
+    print(f"[{today}] === Paper Research Fetch 开始 (模式: {mode}) ===")
 
     # 1. 加载关键词
     keywords = get_active_keywords()
@@ -38,180 +41,23 @@ def cmd_fetch(args, settings, conn):
     if args.dry_run:
         print("  🔍 Dry-run 模式，不实际写入数据库")
 
-    # 2. 异步抓取（增量模式：从上次抓取时间往后，若不足则往前补）
-    from src.db import get_most_recent_fetch_log
+    # 优先级：args.max_results > settings.fetch.max_results
+    max_results = args.max_results if args.max_results > 0 else settings.fetch.max_results
 
-    target_new = settings.arxiv.target_new_per_keyword
-    per_keyword_max_results = {}
-    per_keyword_date_from = {}
-    per_keyword_date_to = {}
-
-    last_log = get_most_recent_fetch_log(conn)
-    if last_log:
-        from datetime import datetime as _dt
-
-        try:
-            last_fetch_dt = _dt.fromisoformat(last_log["run_time"])
-            date_from_str = last_fetch_dt.strftime("%Y%m%d%H%M%S")
-            date_to_str = _dt.utcnow().strftime("%Y%m%d%H%M%S")
-            for kw in keywords:
-                per_keyword_date_from[kw["keyword"]] = date_from_str
-                per_keyword_date_to[kw["keyword"]] = date_to_str
-            print(f"  📅 增量模式: 上次抓取于 {last_log['run_time'][:19]}")
-        except Exception:
-            pass
-
-    for kw in keywords:
-        existing = get_keyword_paper_count(conn, kw["keyword"])
-        desired = existing + target_new
-        capped = min(desired, 500)
-        per_keyword_max_results[kw["keyword"]] = capped
-        print(f"    [{kw['keyword']}]: 已有 {existing} 篇, 本次抓取最多 {capped} 篇")
-    print("  📡 开始抓取 Arxiv...")
-    all_papers, _, _ = asyncio.run(
-        fetch_all(
-            keywords,
-            settings,
-            per_keyword_max_results=per_keyword_max_results,
-            per_keyword_date_from=per_keyword_date_from or None,
-            per_keyword_date_to=per_keyword_date_to or None,
+    # 2. 执行管道（共享逻辑：抓取 → 入库 → 摘要 → HTML → 日志）
+    asyncio.run(
+        run_fetch_pipeline(
+            conn, settings, keywords, max_results, mode=mode, dry_run=bool(args.dry_run)
         )
     )
 
     if args.dry_run:
-        print(f"  📄 共获取 {len(all_papers)} 篇论文（未去重）")
-        for p in all_papers[:10]:
-            print(f"    - [{p['arxiv_id']}] {p['title'][:80]}")
-        if len(all_papers) > 10:
-            print(f"    ... 还有 {len(all_papers) - 10} 篇")
         return
 
-    # 3. 去重 + 版本检测
-    new_papers = []
-    updated_papers = []
-    for paper in all_papers:
-        aid = paper["arxiv_id"]
-        existing = get_paper(conn, aid)
-
-        if existing is None:
-            # 全新论文
-            paper["fetch_date"] = today
-            insert_paper(conn, paper)
-            new_papers.append(paper)
-        elif (
-            existing["arxiv_updated"]
-            and paper.get("arxiv_updated", "") > existing["arxiv_updated"]
-        ):
-            # 版本更新
-            update_paper_version(
-                conn,
-                aid,
-                paper.get("version", 1),
-                paper["arxiv_updated"],
-                today,
-            )
-            updated_papers.append(paper)
-        else:
-            # 无变更，更新检测时间
-            touch_paper(conn, aid, today)
-
-    print(
-        f"  📊 抓取: {len(all_papers)} 篇 | 新增: {len(new_papers)} 篇 | 更新: {len(updated_papers)} 篇"
-    )
-
-    # 4. LLM 摘要（异步并发）
-    to_summarize = new_papers + updated_papers
-    if to_summarize:
-        print(f"  [*] Summarizing {len(to_summarize)} papers...")
-        api_key = settings.llm.api_key
-        if not api_key:
-            scorer = PaperScorer()
-            for paper in to_summarize:
-                try:
-                    result = scorer.score(
-                        paper.get("title", ""), paper.get("abstract", "")
-                    )
-                    if result:
-                        update_paper_summary(
-                            conn,
-                            paper["arxiv_id"],
-                            result.summary,
-                            result.remark,
-                            result.reason,
-                            result.score,
-                        )
-                except Exception as e:
-                    print(f"    [!] Fallback failed [{paper['arxiv_id']}]: {e}")
-            print(f"  [OK] Fallback summary done: {len(to_summarize)} papers")
-        else:
-            scorer = PaperScorer(
-                api_key=api_key,
-                api_base=settings.llm.api_base,
-                model=settings.llm.model,
-                temperature=settings.llm.temperature,
-                max_tokens=settings.llm.max_tokens,
-            )
-            try:
-                results = asyncio.run(scorer.score_batch_async(to_summarize))
-                count = 0
-                for paper, result in zip(to_summarize, results):
-                    if result:
-                        update_paper_summary(
-                            conn,
-                            paper["arxiv_id"],
-                            result.summary,
-                            result.remark,
-                            result.reason,
-                            result.score,
-                        )
-                        count += 1
-                print(f"  [OK] Async summary done: {count}/{len(to_summarize)}")
-            except Exception as e:
-                print(f"  [!] Async summary failed, falling back to serial: {e}")
-                results = scorer.score_batch(to_summarize)
-                for paper, result in zip(to_summarize, results):
-                    if result:
-                        update_paper_summary(
-                            conn,
-                            paper["arxiv_id"],
-                            result.summary,
-                            result.remark,
-                            result.reason,
-                            result.score,
-                        )
-    else:
-        print("  [.] No new papers to summarize")
-
-    # 5. 生成 HTML summary + 笔记画廊
-    print("  [i] 生成 HTML summary...")
-    from src.db import get_papers_for_summary as gfs
-
-    grouped = gfs(conn)
-    generate_summary_html(grouped, OUTPUT_DIR)
-    generate_landing_html(grouped, OUTPUT_DIR)
-    # 为笔记画廊收集所有论文
-    all_p = list(
-        conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500")
-    )
-    generate_notes_index_html([dict(r) for r in all_p], OUTPUT_DIR)
-
-    # 6. 记录日志（通知由 serve 提供，通过 /api/notify 触发）
-    stats = get_stats(conn)
+    # 3. 提示后续操作
     server_url = f"http://{settings.server.host}:{settings.server.port}"
     print(f"  [i] Run '{server_url}/api/notify' to send notification with URL")
-    print(f"  [i] Or start serve: uv run paper-research serve")
-
-    # 7. 记录日志
-    insert_fetch_log(
-        conn,
-        keywords_used=len(keywords),
-        papers_fetched=len(all_papers),
-        papers_new=len(new_papers),
-        papers_updated=len(updated_papers),
-        papers_summarized=len(to_summarize),
-        status="success",
-    )
-
+    print("  [i] Or start serve: uv run paper-research serve")
     print(f"[{today}] === Paper Research Fetch 完成 ===")
 
     # 如果指定了 --serve，自动启动服务
@@ -223,7 +69,7 @@ def cmd_fetch(args, settings, conn):
 # ─── serve ────────────────────────────────────────────────
 
 
-def cmd_serve(args, settings, conn):
+def cmd_serve(_args, settings, conn):
     """启动 FastAPI 本地 Web 服务"""
     from src.serve.server import run_server
 
@@ -232,7 +78,7 @@ def cmd_serve(args, settings, conn):
         print("  ⚠️ 尚未生成 summary，先运行 fetch 命令")
         return
     server_url = f"http://{settings.server.host}:{settings.server.port}"
-    print(f"  [OK] Starting server...")
+    print("  [OK] Starting server...")
     print(f"  [OK] Summary: {server_url}/")
     print(f"  [OK] Notes:   {server_url}/notes")
     print(f"  [OK] API:     {server_url}/docs")
@@ -251,7 +97,8 @@ def cmd_review(args, settings, conn):
     if not args.all and args.head:
         limit_clause = f" LIMIT {args.head}"
 
-    cursor = conn.execute("""
+    cursor = conn.execute(
+        """
         SELECT * FROM papers
         WHERE status = 'summarized' AND user_mark IS NULL
         ORDER BY
@@ -262,7 +109,9 @@ def cmd_review(args, settings, conn):
                 WHEN 'skip' THEN 4
                 ELSE 5
             END,
-            llm_score DESC""" + limit_clause)
+            llm_score DESC"""
+        + limit_clause
+    )
 
     papers = [dict(row) for row in cursor.fetchall()]
 
@@ -283,13 +132,9 @@ def cmd_review(args, settings, conn):
         }.get(p["llm_remark"], p["llm_remark"])
 
         title = p["title"][:60] + "..." if len(p["title"]) > 60 else p["title"]
-        print(
-            f"{i:<4} {p['arxiv_id']:<12} {remark_emoji:<10} {p['llm_score']:<6.2f} {title}"
-        )
+        print(f"{i:<4} {p['arxiv_id']:<12} {remark_emoji:<10} {p['llm_score']:<6.2f} {title}")
 
-    print(
-        '\n用法: uv run paper-research mark <arxiv_id> -t [skim|deep-read|ignore] -n "备注"'
-    )
+    print('\n用法: uv run paper-research mark <arxiv_id> -t [skim|deep-read|ignore]')
 
 
 # ─── mark ─────────────────────────────────────────────────
@@ -301,14 +146,14 @@ def cmd_mark(args, settings, conn):
 
     from src.agents import PaperScorer
     from src.agents.note_agent import NoteAgent
-    from src.db import (get_paper, insert_paper, mark_paper,
-                        update_paper_summary)
-    from src.network.arxiv import fetch_by_ids
+    from src.db import get_paper, insert_paper, mark_paper, update_paper_summary
+    from src.network.factory import get_source
 
     paper = get_paper(conn, args.arxiv_id)
     if not paper:
         print(f"  [i] 论文 {args.arxiv_id} 未入库，正在从 Arxiv 抓取...")
-        papers = asyncio.run(fetch_by_ids([args.arxiv_id]))
+        source = get_source(settings)
+        papers = asyncio.run(source.fetch_by_ids([args.arxiv_id]))
         if not papers:
             print(f"  ❌ 在 Arxiv 上未找到论文: {args.arxiv_id}")
             return
@@ -351,35 +196,31 @@ def cmd_mark(args, settings, conn):
         "deep_read": "[*] Marked Deep Read",
         "lurk": "[~] Marked Pending",
     }
-    print(
-        f"  {label_map.get(mark_type, '[OK]')}  [{args.arxiv_id}] {paper['title'][:80]}"
-    )
+    print(f"  {label_map.get(mark_type, '[OK]')}  [{args.arxiv_id}] {paper['title'][:80]}")
 
     # 粗读或精读 → 自动提取图表 + 生成笔记
     if mark_type in ("skim", "deep_read"):
         print("  [i] Generating note...")
         from src.agents.note_agent import NoteAgent
 
-        asyncio.run(
-            NoteAgent.generate_from_arxiv_id(args.arxiv_id, OUTPUT_DIR, mode=mark_type)
-        )
+        asyncio.run(NoteAgent.generate_from_arxiv_id(args.arxiv_id, OUTPUT_DIR, mode=mark_type))
 
         print(f"  [i] Note generated: output/notes/{args.arxiv_id}/note.md")
 
         note_path = OUTPUT_DIR / "notes" / args.arxiv_id / "note.md"
         if note_path.exists():
-            os.startfile(str(note_path))
+            if sys.platform == "win32":
+                os.startfile(str(note_path))
+            else:
+                subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(note_path)])
 
     # 标记后刷新静态 HTML snapshot + 笔记画廊
     from src.db import get_papers_for_summary as gfs
-    from src.serve.renderer import (generate_notes_index_html,
-                                    generate_summary_html)
+    from src.serve.renderer import generate_notes_index_html, generate_summary_html
 
     grouped = gfs(conn)
     generate_summary_html(grouped, OUTPUT_DIR)
-    all_p = list(
-        conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500")
-    )
+    all_p = list(conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500"))
     generate_notes_index_html([dict(r) for r in all_p], OUTPUT_DIR)
 
 
@@ -395,14 +236,14 @@ def cmd_note(args, settings, conn):
 
     from src.agents import PaperScorer
     from src.agents.note_agent import NoteAgent
-    from src.db import (get_paper, insert_paper, mark_paper,
-                        update_paper_summary)
-    from src.network.arxiv import fetch_by_ids
+    from src.db import get_paper, insert_paper, mark_paper, update_paper_summary
+    from src.network.factory import get_source
 
     paper = get_paper(conn, args.arxiv_id)
     if not paper:
         print(f"  [i] 论文 {args.arxiv_id} 未入库，正在从 Arxiv 抓取...")
-        papers = asyncio.run(fetch_by_ids([args.arxiv_id]))
+        source = get_source(settings)
+        papers = asyncio.run(source.fetch_by_ids([args.arxiv_id]))
         if not papers:
             print(f"  ❌ 在 Arxiv 上未找到论文: {args.arxiv_id}")
             return
@@ -439,23 +280,23 @@ def cmd_note(args, settings, conn):
     note_path = note_dir / "note.md"
 
     if not note_path.exists():
-        print(f"  📝 生成阅读笔记...")
+        print("  📝 生成阅读笔记...")
         asyncio.run(NoteAgent.generate_from_arxiv_id(args.arxiv_id, OUTPUT_DIR))
 
     # 标记后刷新静态 HTML snapshot + 笔记画廊
     from src.db import get_papers_for_summary as gfs
-    from src.serve.renderer import (generate_notes_index_html,
-                                    generate_summary_html)
+    from src.serve.renderer import generate_notes_index_html, generate_summary_html
 
     grouped = gfs(conn)
     generate_summary_html(grouped, OUTPUT_DIR)
-    all_p = list(
-        conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500")
-    )
+    all_p = list(conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500"))
     generate_notes_index_html([dict(r) for r in all_p], OUTPUT_DIR)
 
     print(f"  📂 打开笔记: {note_path}")
-    os.startfile(str(note_path))
+    if sys.platform == "win32":
+        os.startfile(str(note_path))
+    else:
+        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", str(note_path)])
 
 
 # ─── list ─────────────────────────────────────────────────
@@ -531,17 +372,12 @@ def cmd_list(args, settings, conn):
     }
 
     for i, p in enumerate(papers, 1):
-
         remark_icon = remark_map.get(p["llm_remark"], "??")
-        user_mark_str = (
-            f" {mark_icons.get(p['user_mark'], '?')}" if p["user_mark"] else "待处理"
-        )
+        user_mark_str = f" {mark_icons.get(p['user_mark'], '?')}" if p["user_mark"] else "待处理"
         updated_str = " (UPD)" if p["is_updated"] else ""
 
         title = p["title"][:70] + "..." if len(p["title"]) > 70 else p["title"]
-        print(
-            f"{i:>3}. {remark_icon} [{p['arxiv_id']}] {title} {user_mark_str} {updated_str}"
-        )
+        print(f"{i:>3}. {remark_icon} [{p['arxiv_id']}] {title} {user_mark_str} {updated_str}")
         print(
             f"     日期: {p['published']}  |  评分: {p['llm_score']:.2f}  |  原因: {p.get('llm_reason', '')[:60]}\n"
         )
@@ -585,15 +421,9 @@ def cmd_status(args, settings, conn):
     # AI 评级分布
     lines.append(left("  AI Remark Distribution"))
     lines.append(
-        left(
-            f"    ** Important: {stats['important']:>4}      !! Useful: {stats['useful']:>4}"
-        )
+        left(f"    ** Important: {stats['important']:>4}      !! Useful: {stats['useful']:>4}")
     )
-    lines.append(
-        left(
-            f"    .. Browse:   {stats['browse']:>4}      -- Skip:   {stats['skip']:>4}"
-        )
-    )
+    lines.append(left(f"    .. Browse:   {stats['browse']:>4}      -- Skip:   {stats['skip']:>4}"))
     lines.append(sep())
 
     # 关键词待审
@@ -613,9 +443,7 @@ def cmd_status(args, settings, conn):
     if logs:
         for log in logs:
             icon = (
-                "OK"
-                if log["status"] == "success"
-                else "!!" if log["status"] == "partial" else "XX"
+                "OK" if log["status"] == "success" else "!!" if log["status"] == "partial" else "XX"
             )
             lines.append(
                 left(
@@ -654,8 +482,6 @@ def cmd_notify(args, settings, conn):
         url=server_url,
     )
     kw_str = ", ".join(f"{k['keyword']}({k['count']})" for k in keywords)
-    print(
-        f"  [OK] Toast sent: Important={important_count}, Pending={pending}, Keywords=[{kw_str}]"
-    )
+    print(f"  [OK] Toast sent: Important={important_count}, Pending={pending}, Keywords=[{kw_str}]")
 
     send_email_if_configured(settings, stats, server_url, keywords=keywords)

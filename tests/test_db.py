@@ -249,7 +249,7 @@ class TestNoteCategories:
 
 
 class TestQueries:
-    def test_get_papers_for_summary(self, sample_papers, conn):
+    def test_get_papers_for_summary(self, setup_sample_papers, conn):
         result = get_papers_for_summary(conn)
         assert "unmarked" in result
         assert "marked" in result
@@ -282,34 +282,34 @@ class TestQueries:
         result = get_papers_for_summary(conn)
         assert any(p["arxiv_id"] == "2401.00010" for p in result["lurk"])
 
-    def test_get_pending_keywords(self, sample_papers, conn):
+    def test_get_pending_keywords(self, setup_sample_papers, conn):
         keywords = get_pending_keywords(conn)
         names = [k["keyword"] for k in keywords]
         assert "out-of-distribution detection" in names
 
-    def test_get_papers_by_mark(self, sample_papers, conn):
+    def test_get_papers_by_mark(self, setup_sample_papers, conn):
         papers = get_papers_by_mark(conn, "deep_read")
         assert len(papers) == 1
         assert papers[0]["arxiv_id"] == "2401.00001"
 
-    def test_get_papers_by_keyword(self, sample_papers, conn):
+    def test_get_papers_by_keyword(self, setup_sample_papers, conn):
         papers = get_papers_by_keyword(conn, "test-time adaptation")
         assert len(papers) == 1
         assert papers[0]["arxiv_id"] == "2401.00001"
 
-    def test_get_keyword_paper_count(self, sample_papers, conn):
+    def test_get_keyword_paper_count(self, setup_sample_papers, conn):
         cnt = get_keyword_paper_count(conn, "test-time adaptation")
         assert cnt == 1
 
-    def test_get_all_papers(self, sample_papers, conn):
+    def test_get_all_papers(self, setup_sample_papers, conn):
         all_p = get_all_papers(conn)
         assert len(all_p) == 3
 
-    def test_get_all_papers_with_status(self, sample_papers, conn):
+    def test_get_all_papers_with_status(self, setup_sample_papers, conn):
         summarized = get_all_papers(conn, status="summarized")
         assert 1 <= len(summarized) <= 3
 
-    def test_get_all_papers_limit(self, sample_papers, conn):
+    def test_get_all_papers_limit(self, setup_sample_papers, conn):
         limited = get_all_papers(conn, limit=2)
         assert len(limited) == 2
 
@@ -318,13 +318,13 @@ class TestQueries:
 
 
 class TestStats:
-    def test_get_stats_basic(self, sample_papers, conn):
+    def test_get_stats_basic(self, setup_sample_papers, conn):
         stats = get_stats(conn)
         assert stats["total"] == 3
         assert isinstance(stats["important"], int)
         assert isinstance(stats["deep_read"], int)
 
-    def test_get_stats_detail(self, sample_papers, conn):
+    def test_get_stats_detail(self, setup_sample_papers, conn):
         stats = get_stats(conn)
         assert stats["important"] >= 1
         assert stats["useful"] >= 1
@@ -406,11 +406,11 @@ class TestFetchLog:
         logs = get_recent_logs(conn, limit=3)
         assert len(logs) == 3
 
-    def test_get_earliest_paper_date_for_keyword(self, sample_papers, conn):
+    def test_get_earliest_paper_date_for_keyword(self, setup_sample_papers, conn):
         date = get_earliest_paper_date_for_keyword(conn, "test-time adaptation")
         assert date == "2024-01-01"
 
-    def test_get_earliest_paper_date_for_keyword_missing(self, sample_papers, conn):
+    def test_get_earliest_paper_date_for_keyword_missing(self, setup_sample_papers, conn):
         date = get_earliest_paper_date_for_keyword(conn, "nonexistent")
         assert date is None
 

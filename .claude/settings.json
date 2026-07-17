@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest --tb=short -q)",
+      "Bash(python -m pytest tests/test_commands_coverage.py::TestCmdMarkEdgeCases::test_mark_ignore_skip_note -v --tb=long)",
+      "Bash(python -m pytest tests/test_commands_coverage.py -v --tb=long)",
+      "Bash(python -m pytest --tb=line -q)",
+      "Bash(python -W ignore -m pytest --tb=line -q)",
+      "Bash(python -m pytest tests/network/test_factory.py tests/network/test_arxiv.py tests/network/test_fetch_pipeline.py -v --tb=short)",
+      "Bash(python -m pytest -v --tb=short)"
+    ]
+  }
+}

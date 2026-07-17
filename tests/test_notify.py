@@ -112,3 +112,12 @@ class TestSendEmailIfConfigured:
             assert result is False
             captured = capsys.readouterr()
             assert "Email send failed" in captured.out
+
+
+class TestSendWindowsToastEdgeCases:
+    def test_send_toast_win11toast_not_available(self, capsys):
+        """win11toast 未安装时（toast is None）打印提示"""
+        with patch("src.notify.toast", None):
+            send_windows_toast("Title", "Message")
+            captured = capsys.readouterr()
+            assert "不可用" in captured.out

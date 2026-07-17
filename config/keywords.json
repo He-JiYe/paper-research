@@ -48,7 +48,7 @@
   },
   {
     "keyword": "RL",
-    "arxiv_cat": "cs.LG",
+    "arxiv_cats": ["cs.LG"],
     "active": true
   }
 ]

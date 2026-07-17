@@ -123,7 +123,7 @@ class NoteAgent(BaseAgent):
         # 2. 解析 PDF
         parser = ParserAgent.from_config(settings.llm)
         print(f"  [i] Parsing PDF for {arxiv_id}...")
-        parsed_content = await parser.parse(arxiv_id, output_dir)
+        parsed_content = await parser.parse(arxiv_id, output_dir, settings=settings)
 
         # 3. 生成笔记
         agent = cls.from_config(settings.llm)
@@ -177,7 +177,6 @@ class NoteAgent(BaseAgent):
         Returns:
             笔记文件路径
         """
-        paper["arxiv_id"]
         figures = parsed_content.get("figures", [])
         tables = parsed_content.get("tables", [])
         text = parsed_content.get("text", {})

@@ -23,8 +23,9 @@ DEFAULT_USER_AGENT = "PaperResearch/1.0"
 
 def _get_user_agent(settings) -> str:
     """从 settings 或环境变量读取 User-Agent"""
-    if hasattr(settings, "arxiv") and hasattr(settings.arxiv, "user_agent"):
-        return settings.arxiv.user_agent
+    ua = getattr(settings, "fetch", None)
+    if ua and ua.user_agent:
+        return ua.user_agent
     return DEFAULT_USER_AGENT
 
 
@@ -77,17 +78,11 @@ def _parse_atom(xml_text: str, keyword: str = "") -> list[dict]:
         version = int(version_match.group(1)) if version_match else 1
 
         title_el = entry.find("atom:title", ns)
-        title = (
-            (title_el.text or "").strip().replace("\n", " ")
-            if title_el is not None
-            else ""
-        )
+        title = (title_el.text or "").strip().replace("\n", " ") if title_el is not None else ""
 
         summary_el = entry.find("atom:summary", ns)
         abstract = (
-            (summary_el.text or "").strip().replace("\n", " ")
-            if summary_el is not None
-            else ""
+            (summary_el.text or "").strip().replace("\n", " ") if summary_el is not None else ""
         )
 
         authors = []
@@ -136,6 +131,38 @@ def _parse_atom(xml_text: str, keyword: str = "") -> list[dict]:
     return papers
 
 
+def _relevance_sort_key(paper: dict, keyword: str) -> float:
+    """计算论文与关键词的简单相关性得分（用于排序）。
+
+    对 title 和 abstract 分别与 keyword 做 token 重叠匹配，
+    标题匹配权重为摘要的 2 倍。纯文本处理，无需外部依赖。
+    """
+    if not keyword:
+        return 0.0
+
+    kw_tokens = set(re.findall(r"[a-z0-9]+(?:[-_][a-z0-9]+)*", keyword.lower()))
+    if not kw_tokens:
+        return 0.0
+
+    title_tokens = set(
+        re.findall(r"[a-z0-9]+(?:[-_][a-z0-9]+)*", paper.get("title", "").lower())
+    )
+    abstract_tokens = set(
+        re.findall(r"[a-z0-9]+(?:[-_][a-z0-9]+)*", paper.get("abstract", "").lower())
+    )
+
+    overlap_title = len(kw_tokens & title_tokens)
+    overlap_abstract = len(kw_tokens & abstract_tokens)
+    n = len(kw_tokens)
+
+    if n == 0:
+        return 0.0
+
+    # 标题匹配权重 ×2，摘要匹配权重 ×1
+    score = (overlap_title * 2 + overlap_abstract) / (n * 3)
+    return round(min(1.0, score), 4)
+
+
 # ─── 关键词查询 ────────────────────────────────────────────
 
 
@@ -144,62 +171,132 @@ async def fetch_keyword(
     keyword: str,
     arxiv_cats: list[str] | None = None,
     max_results: int = 50,
-    lookback_days: int = 30,
-    date_from: str | None = None,
-    date_to: str | None = None,
+    lookback_days: int = 7,
+    historical: bool = False,
+    skip_ids: set[str] | None = None,
 ) -> list[dict]:
-    """异步查询单个关键词，支持分类筛选和日期范围。
+    """异步查询单个关键词。
 
     Args:
         client: httpx 客户端
         keyword: 搜索关键词
         arxiv_cats: Arxiv 分类列表
         max_results: 最大结果数
-        lookback_days: 回溯天数（date_from/date_to 未指定时使用）
-        date_from: 起始日期 (YYYYMMDD)，覆盖 lookback_days
-        date_to: 结束日期 (YYYYMMDD)，默认当天
+        lookback_days: 回溯天数
+        historical: True=不限制时间, False=限制时间为[now-lookback_days,now]
+        skip_ids: 需要跳过的 arxiv_id 集合（已存在的论文）
+
+    Returns:
+        论文列表（已去重）
     """
-    if date_from is None:
-        from datetime import datetime, timedelta
+    from datetime import datetime, timedelta
 
-        now = datetime.now(UTC)
-        since = now - timedelta(days=lookback_days)
-        date_from = since.strftime("%Y%m%d")
-        date_to = now.strftime("%Y%m%d")
-    elif date_to is None:
-        from datetime import datetime
+    seen_ids: set[str] = set()  # 单关键词去重
+    all_new: list[dict] = []
 
-        date_to = datetime.now(UTC).strftime("%Y%m%d")
-
-    date_filter = f"+AND+submittedDate:[{date_from}+TO+{date_to}]"
-
+    # 构建查询基础部分（分类筛选）
     if arxiv_cats and len(arxiv_cats) > 0:
         cat_part = "+OR+".join(f"cat:{c}" for c in arxiv_cats)
-        query = f"({cat_part})+AND+all:{keyword}{date_filter}"
+        query = f"({cat_part})+AND+all:{keyword}"
     else:
-        query = f"all:{keyword}{date_filter}"
+        query = f"all:{keyword}"
 
-    params = {
-        "search_query": query,
-        "start": 0,
-        "max_results": max_results,
-        "sortBy": "submittedDate",
-        "sortOrder": "descending",
-    }
+    if historical:  # 无时间限制：单次获取
+        # 分页获取，直到抓取到足够新论文或结果耗尽
+        page_size = min(max(max_results * 2, 25), 200)
+        start = 0
 
-    response = await client.get(ARXIV_API_BASE, params=params, timeout=30)
-    response.raise_for_status()
+        while len(all_new) < max_results:
+            prev_count = len(all_new)
 
-    papers = _parse_atom(response.text, keyword=keyword)
-    return papers
+            params = {
+                "search_query": query,
+                "start": start,
+                "max_results": page_size,
+                "sortBy": "relevance",
+                "sortOrder": "descending",
+            }
+            response = await client.get(ARXIV_API_BASE, params=params, timeout=30)
+            response.raise_for_status()
 
+            papers = _parse_atom(response.text, keyword=keyword)
+
+            if not papers:
+                break
+
+            for p in papers:
+                aid = p["arxiv_id"]
+                if aid in seen_ids:                 # 去重
+                    continue
+                if skip_ids and aid in skip_ids:    # 跳过已存在的论文
+                    continue
+                seen_ids.add(aid)
+                all_new.append(p)
+                if len(all_new) >= max_results:
+                    break
+
+            # 已至少抓过一页、且本轮未新增 → 结果已耗尽
+            if start > 0 and len(all_new) == prev_count:
+                break
+
+            start += len(papers)
+            await asyncio.sleep(0.5)
+
+        return all_new
+    else:
+        p_cutoff = (datetime.now(UTC) - timedelta(days=lookback_days)).isoformat()[:10]
+
+        # 分页抓取 lookback_days 时间段内的全部论文
+        page_size = min(max(max_results, 25), 200)
+        start = 0
+        exhausted = False
+
+        while True:
+            params = {
+                "search_query": query,
+                "start": start,
+                "max_results": page_size,
+                "sortBy": "submittedDate",
+                "sortOrder": "descending",
+            }
+            response = await client.get(ARXIV_API_BASE, params=params, timeout=30)
+            response.raise_for_status()
+
+            papers = _parse_atom(response.text, keyword=keyword)
+
+            if not papers:
+                break
+
+            for p in papers:
+                aid = p["arxiv_id"]
+                if aid in seen_ids:
+                    continue
+                if skip_ids and aid in skip_ids:
+                    continue
+                
+                if p["published"] < p_cutoff:
+                    exhausted = True
+                    break
+
+                seen_ids.add(aid)
+                all_new.append(p)
+
+            if exhausted:
+                break
+
+            start += len(papers)
+            await asyncio.sleep(0.5)
+
+        print(f"{len(all_new)} 篇新论文（关键词: {keyword}）")
+        all_new.sort(key=lambda p: _relevance_sort_key(p, keyword), reverse=True)
+        return all_new[:max_results]
 
 async def fetch_all(
     keywords: list[dict],
     settings,
-    per_keyword_max_results: dict[str, int] | None = None,
-    per_keyword_date_from: dict[str, str] | None = None,
-    per_keyword_date_to: dict[str, str] | None = None,
+    max_results: int = 50,
+    historical: bool = False,
+    skip_ids: set[str] | None = None,
 ) -> tuple[list[dict], int, int]:
     """
     并发查询所有活跃关键词。
@@ -207,17 +304,16 @@ async def fetch_all(
     Args:
         keywords: 关键词列表，每项含 keyword, arxiv_cat(可选), active
         settings: AppConfig 对象
-        per_keyword_max_results: 可选 keyword->max_results 覆盖字典
-        per_keyword_date_from: 可选 keyword->date_from 覆盖（YYYYMMDD）
-        per_keyword_date_to: 可选 keyword->date_to 覆盖（YYYYMMDD）
+        max_results: 每个关键词的最大结果数
+        historical: True=不限制时间, False=限制时间为[now-lookback_days,now]
+        skip_ids: 需要跳过的 arxiv_id 集合（已存在的论文）
 
     Returns:
         (去重后的论文列表, 总篇数, 重复篇数)
     """
-    arxiv_cfg = settings.arxiv
-    max_results = arxiv_cfg.target_new_per_keyword * 2  # 默认每关键词抓取量
-    max_conns = arxiv_cfg.max_concurrent_requests
-    lookback_days = arxiv_cfg.lookback_days
+    fetch_cfg = settings.fetch
+    max_conns = fetch_cfg.max_concurrent_requests
+    lookback_days = fetch_cfg.lookback_days
     user_agent = _get_user_agent(settings)
 
     active_kws = [kw for kw in keywords if kw.get("active", True)]
@@ -235,28 +331,16 @@ async def fetch_all(
         tasks = []
         for kw in active_kws:
             kw_name = kw["keyword"]
-            if per_keyword_max_results and kw_name in per_keyword_max_results:
-                kw_max = per_keyword_max_results[kw_name]
-            else:
-                kw_max = kw.get("max_results", max_results)
-            kw_cats = kw.get("arxiv_cats") or (
-                [kw["arxiv_cat"]] if kw.get("arxiv_cat") else None
-            )
-            kw_date_from = (
-                per_keyword_date_from.get(kw_name) if per_keyword_date_from else None
-            )
-            kw_date_to = (
-                per_keyword_date_to.get(kw_name) if per_keyword_date_to else None
-            )
+            kw_cats = kw.get("arxiv_cats") or ([kw["arxiv_cat"]] if kw.get("arxiv_cat") else None)
             tasks.append(
                 fetch_keyword(
                     client,
                     kw_name,
                     kw_cats,
-                    kw_max,
+                    max_results,
                     lookback_days,
-                    date_from=kw_date_from,
-                    date_to=kw_date_to,
+                    historical=historical,
+                    skip_ids=skip_ids,
                 )
             )
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -271,19 +355,18 @@ async def fetch_all(
         print(f"  ✅ [{kw['keyword']}]: {len(result)} 篇")
         all_papers.extend(result)
 
-    # 去重（同一篇论文可能命中多个关键词）
+    # 多关键词去重
     seen = set()
     unique = []
     for p in all_papers:
-        if p["arxiv_id"] not in seen:
-            seen.add(p["arxiv_id"])
-            unique.append(p)
+        if p["arxiv_id"] in seen:
+            continue
+        seen.add(p["arxiv_id"])
+        unique.append(p)
 
     duplicate_count = len(all_papers) - len(unique)
     if duplicate_count:
-        print(
-            f"  🔗 去重: {len(all_papers)} → {len(unique)} (去重 {duplicate_count} 篇)"
-        )
+        print(f"  🔗 去重 {duplicate_count} 篇: {len(all_papers)} → {len(unique)}")
 
     return unique, len(all_papers), duplicate_count
 

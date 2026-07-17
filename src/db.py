@@ -2,7 +2,6 @@
 
 import datetime
 import sqlite3
-from typing import Optional
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
@@ -111,7 +110,7 @@ def exists(conn: sqlite3.Connection, arxiv_id: str) -> bool:
     return cursor.fetchone() is not None
 
 
-def get_paper(conn: sqlite3.Connection, arxiv_id: str) -> Optional[dict]:
+def get_paper(conn: sqlite3.Connection, arxiv_id: str) -> dict | None:
     """获取单篇论文数据"""
     cursor = conn.execute("SELECT * FROM papers WHERE arxiv_id = ?", (arxiv_id,))
     row = cursor.fetchone()
@@ -208,7 +207,7 @@ def mark_paper(
     arxiv_id: str,
     mark_type: str,
 ):
-    """用户标记论文（'pending' 清空标记，放回待审核）"""
+    """用户标记论文（"pending" 清空标记，放回待审核）"""
     if mark_type == "pending":
         conn.execute(
             "UPDATE papers SET user_mark = NULL, status = 'summarized' WHERE arxiv_id = ?",
@@ -222,7 +221,7 @@ def mark_paper(
     conn.commit()
 
 
-def get_paper_status(conn: sqlite3.Connection, arxiv_id: str) -> Optional[str]:
+def get_paper_status(conn: sqlite3.Connection, arxiv_id: str) -> str | None:
     """获取论文状态"""
     cursor = conn.execute("SELECT status FROM papers WHERE arxiv_id = ?", (arxiv_id,))
     row = cursor.fetchone()
@@ -388,7 +387,7 @@ def get_keyword_paper_count(conn: sqlite3.Connection, keyword: str) -> int:
 
 def get_all_papers(
     conn: sqlite3.Connection,
-    status: Optional[str] = None,
+    status: str | None = None,
     limit: int = 200,
 ) -> list[dict]:
     """获取所有论文，可选状态过滤"""
@@ -469,7 +468,7 @@ def insert_fetch_log(
     papers_updated: int,
     papers_summarized: int,
     status: str = "success",
-    error_msg: Optional[str] = None,
+    error_msg: str | None = None,
 ):
     """插入抓取日志"""
     run_time = datetime.datetime.now().isoformat()
@@ -503,7 +502,7 @@ def get_recent_logs(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
     return [dict(row) for row in cursor.fetchall()]
 
 
-def get_most_recent_fetch_log(conn: sqlite3.Connection) -> Optional[dict]:
+def get_most_recent_fetch_log(conn: sqlite3.Connection) -> dict | None:
     """获取最近一次成功的抓取日志。"""
     cursor = conn.execute(
         "SELECT * FROM fetch_log WHERE status = 'success' ORDER BY run_time DESC LIMIT 1"
@@ -514,7 +513,7 @@ def get_most_recent_fetch_log(conn: sqlite3.Connection) -> Optional[dict]:
 
 def get_earliest_paper_date_for_keyword(
     conn: sqlite3.Connection, keyword: str
-) -> Optional[str]:
+) -> str | None:
     """获取某个关键词匹配论文的最早发表日期。"""
     cursor = conn.execute(
         "SELECT MIN(published) FROM papers WHERE keyword_match LIKE ? AND published != ''",
