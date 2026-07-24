@@ -33,11 +33,10 @@ fetch_status.json
 
 # ── Sensitive configuration ─────────────────────────
 config/settings.json
+config/config.yaml
+config/*.local.yaml
 
 # ── Orphan files from old structure (moved to subdirectories) ─
-# src/renderer.py -> src/serve/renderer.py
-# src/server.py -> src/serve/server.py
-# src/network.py -> src/network/arxiv.py
 /src/renderer.py
 /src/server.py
 /src/network.py
@@ -60,12 +59,9 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# ── Claude Code ─────────────────────────────────────
-.claude/settings.local.json
-.claude/worktrees/
-.claude/plans/
+# ── LLM Agent ─────────────────────────────────────
+.claude/
+.workbuddy
 
-# ── Misc ────────────────────────────────────────────
-TODO.md
-PLAN.md
-# setup_task.ps1
+# ── tests ─────────────────────────────────────
+tests/

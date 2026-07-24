@@ -1,186 +1,154 @@
-"""通知推送模块：Windows Toast 通知（win11toast） + 邮件发送"""
+"""通知推送模块：邮件发送（仅展示 Top 3 论文 + 审阅页面链接）"""
 
 import datetime
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
-try:
-    from win11toast import toast
-except ImportError:
-    toast = None  # Windows 专属，Linux/macOS 上不可用
-
-
-def send_windows_toast(
-    title: str,
-    message: str,
-    *,
-    keywords: list[dict] | None = None,
-    url: str = "",
-    icon: str = "",
-):
-    """
-    弹出 Windows 原生通知（使用 win11toast）。
-
-    Args:
-        title: 通知标题（如 "Arxiv Paper Research"）
-        message: 通知正文
-        keywords: 可选，格式 [{"keyword": "ML", "count": 3}, ...]
-        url: 可选，通知按钮点击后打开的 URL
-        icon: 可选，通知图标路径
-    """
-    # 构造结构化正文
-    body_parts = []
-
-    if keywords:
-        body_parts.append("📌 待审阅:")
-        for k in keywords:
-            body_parts.append(f"  • {k['keyword']}  ({k['count']} 篇)")
-        body_parts.append("")
-
-    body_parts.append(message)
-    body = "\n".join(body_parts)
-
-    buttons = []
-    if url:
-        buttons.append(
-            {
-                "activationType": "protocol",
-                "arguments": url,
-                "content": "打开审阅",
-            }
-        )
-
-    if toast is None:
-        print("  [i] Windows Toast 通知不可用（win11toast 未安装，仅支持 Windows）")
-        return
-
-    try:
-        toast(title, body, icon=icon, buttons=buttons, duration="long")
-    except Exception as e:
-        print(f"  [i] Toast notification failed: {e}")
+from src.config import EmailConfig
 
 
-def send_email_if_configured(
-    settings,
-    stats: dict,
-    server_url: str = "http://localhost:8899",
-    keywords: list[dict] | None = None,
-) -> bool:
-    """
-    发送简洁的邮件摘要（含统计和链接，而非完整 HTML 页面）。
+class EmailNotifier:
+    """邮件通知器 —— 抓取完成后发送报告邮件。"""
 
-    Args:
-        settings: AppConfig 对象
-        stats: get_stats() 返回的统计字典
-        server_url: Web 审阅服务的 URL
-        keywords: 可选，格式 [{"keyword": "ML", "count": 3}, ...]
+    def __init__(self, config: EmailConfig):
+        self.config = config
 
-    Returns:
-        是否成功发送
-    """
-    email_cfg = settings.notification.email
+    def send_fetch_report(
+        self,
+        stats: dict,
+        new_papers: list[dict],
+        keywords: list[str],
+        server_url: str = "http://localhost:8899",
+    ) -> bool:
+        """发送简洁邮件：统计摘要 + Top 3 论文 + 审阅页面链接。
 
-    if not email_cfg.enabled:
-        return False
+        Args:
+            stats: 统计信息
+            new_papers: 新论文列表（取 Top 3）
+            keywords: 关键词列表
+            server_url: Web 审阅服务地址
 
-    if not email_cfg.smtp_host or not email_cfg.username:
-        print("  [i] Email notification enabled but SMTP config incomplete, skipping")
-        return False
+        Returns:
+            是否成功发送
+        """
+        cfg = self.config
+        if not cfg.enabled:
+            return False
+        if not cfg.smtp_host or not cfg.username:
+            print("  [i] Email enabled but SMTP config incomplete, skipping")
+            return False
 
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
+        today = datetime.date.today().isoformat()
+        run_time = datetime.datetime.now().strftime("%H:%M")
 
-    today = datetime.date.today().isoformat()
-    run_time = datetime.datetime.now().strftime("%H:%M")
+        total = stats.get("total", 0)
+        pending = stats.get("pending", 0)
+        important = stats.get("by_remark", {}).get("important", 0) if isinstance(stats.get("by_remark"), dict) else 0
+        useful = stats.get("by_remark", {}).get("useful", 0) if isinstance(stats.get("by_remark"), dict) else 0
 
-    # 构建简洁的邮件正文（HTML 格式）
-    important = stats.get("important", 0)
-    useful = stats.get("useful", 0)
-    pending = stats.get("summarized_pending", 0)
-
-    keywords_html = ""
-    if keywords:
-        rows = "".join(f"""<tr>
-                <td style="padding:8px 16px;background:#f8f9fa;border-radius:6px;font-size:14px;color:#333;">
-                    <span style="font-weight:600;">{k["keyword"]}</span>
-                    <span style="float:right;background:#e74c3c;color:white;border-radius:10px;padding:1px 10px;font-size:13px;">{k["count"]} 篇待审</span>
+        # Top 3 论文（按 llm_score 降序）
+        top3 = sorted(new_papers, key=lambda p: p.get("llm_score", 0), reverse=True)[:3]
+        papers_html = ""
+        for p in top3:
+            score = p.get("llm_score", 0)
+            remark = p.get("llm_remark", "")
+            papers_html += f"""<tr>
+                <td style="padding:8px;border-bottom:1px solid #eee;">
+                    <a href="{p.get('url', '#')}" style="color:#667eea;text-decoration:none;font-weight:500;">{p.get('title', '')[:80]}</a>
                 </td>
-            </tr>""" for k in keywords)
-        keywords_html = f"""<table style="width:100%;border-collapse:separate;border-spacing:0 6px;margin-bottom:16px;">{rows}</table>"""
+                <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">
+                    <span style="background:{_remark_color(remark)};color:white;padding:2px 8px;border-radius:4px;font-size:12px;">{remark}</span>
+                </td>
+                <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;font-size:14px;">{score:.2f}</td>
+            </tr>"""
 
-    html_body = f"""<!DOCTYPE html>
+        if papers_html:
+            papers_html = f"""<h3 style="font-size:15px;margin:16px 0 8px;">Top 3 论文</h3>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+                <tr style="background:#f8f9fa;">
+                    <th style="padding:8px;text-align:left;font-size:13px;color:#666;">论文</th>
+                    <th style="padding:8px;text-align:center;font-size:13px;color:#666;">评级</th>
+                    <th style="padding:8px;text-align:center;font-size:13px;color:#666;">评分</th>
+                </tr>{papers_html}</table>"""
+
+        keywords_str = ", ".join(keywords) if keywords else "未指定"
+
+        html_body = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
-<body style="font-family: -apple-system, 'Microsoft YaHei', sans-serif; padding: 20px; color: #333;">
-<div style="max-width: 600px; margin: 0 auto;">
-    <div style="background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 24px; border-radius: 12px; text-align: center; margin-bottom: 20px;">
-        <h1 style="margin: 0; font-size: 22px;">Arxiv 论文跟踪日报</h1>
-        <p style="margin: 8px 0 0; opacity: 0.85;">{today} {run_time}</p>
+<body style="font-family:-apple-system,'Microsoft YaHei',sans-serif;padding:20px;color:#333;">
+<div style="max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;padding:24px;border-radius:12px;text-align:center;margin-bottom:20px;">
+        <h1 style="margin:0;font-size:22px;">Arxiv 论文跟踪</h1>
+        <p style="margin:8px 0 0;opacity:0.85;">{today} {run_time}</p>
     </div>
 
-    {keywords_html}
-
-    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+    <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
         <tr>
-            <td style="text-align: center; padding: 12px; background: #f8f9fa; border-radius: 8px 0 0 8px;">
-                <div style="font-size: 24px; font-weight: bold; color: #e74c3c;">{important}</div>
-                <div style="font-size: 12px; color: #888;">Important</div>
+            <td style="text-align:center;padding:12px;background:#f8f9fa;border-radius:8px 0 0 8px;width:25%;">
+                <div style="font-size:24px;font-weight:bold;color:#e74c3c;">{important}</div>
+                <div style="font-size:12px;color:#888;">重要</div>
             </td>
-            <td style="text-align: center; padding: 12px; background: #f8f9fa;">
-                <div style="font-size: 24px; font-weight: bold; color: #f39c12;">{useful}</div>
-                <div style="font-size: 12px; color: #888;">Useful</div>
+            <td style="text-align:center;padding:12px;background:#f8f9fa;width:25%;">
+                <div style="font-size:24px;font-weight:bold;color:#f39c12;">{useful}</div>
+                <div style="font-size:12px;color:#888;">值得关注</div>
             </td>
-            <td style="text-align: center; padding: 12px; background: #f8f9fa;">
-                <div style="font-size: 24px; font-weight: bold; color: #e67e22;">{pending}</div>
-                <div style="font-size: 12px; color: #888;">待审核</div>
+            <td style="text-align:center;padding:12px;background:#f8f9fa;width:25%;">
+                <div style="font-size:24px;font-weight:bold;color:#e67e22;">{pending}</div>
+                <div style="font-size:12px;color:#888;">待审核</div>
             </td>
-            <td style="text-align: center; padding: 12px; background: #f8f9fa; border-radius: 0 8px 8px 0;">
+            <td style="text-align:center;padding:12px;background:#f8f9fa;border-radius:0 8px 8px 0;width:25%;">
+                <div style="font-size:24px;font-weight:bold;color:#95a5a6;">{total}</div>
+                <div style="font-size:12px;color:#888;">总计</div>
             </td>
         </tr>
     </table>
 
-    <div style="background: #f0f7ff; padding: 16px; border-radius: 8px; margin-bottom: 20px; border-left: 3px solid #667eea;">
-        <p style="margin: 0 0 8px; font-size: 14px; color: #555;">
+    {papers_html}
+
+    <div style="background:#f0f7ff;padding:16px;border-radius:8px;margin-bottom:20px;border-left:3px solid #667eea;">
+        <p style="margin:0 0 8px;font-size:14px;color:#555;">
             打开审阅页面查看完整论文列表并进行标记:
         </p>
-        <a href="{server_url}" style="display: inline-block; background: #667eea; color: white; text-decoration: none; padding: 10px 24px; border-radius: 6px; font-size: 14px;">打开审阅页面</a>
+        <a href="{server_url}" style="display:inline-block;background:#667eea;color:white;text-decoration:none;padding:10px 24px;border-radius:6px;font-size:14px;">打开审阅页面</a>
     </div>
 
-    <div style="font-size: 12px; color: #999; text-align: center; border-top: 1px solid #eee; padding-top: 16px;">
-        <p>本邮件由 Paper Research 自动生成</p>
+    <div style="font-size:12px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:16px;">
+        <p>关键词: {keywords_str} | 本邮件由 Paper Research 自动生成</p>
     </div>
 </div>
 </body>
 </html>"""
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Arxiv Paper Daily - {today}" + (
-        f" [{', '.join(k['keyword'] for k in keywords)}]" if keywords else ""
-    )
-    msg["From"] = email_cfg.from_addr
-    msg["To"] = email_cfg.to_addr
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"Arxiv Paper Fetch - {today} [{keywords_str}]"
+        msg["From"] = cfg.from_addr
+        msg["To"] = cfg.to_addr
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    # 纯文本备用
-    keywords_line = (
-        " | ".join(f"{k['keyword']}({k['count']})" for k in keywords) + " | "
-        if keywords
-        else ""
-    )
-    text_body = f"""Arxiv Paper Research Daily - {today}
-
-{keywords_line}Important: {important} | Useful: {useful} | Pending: {pending}
-Open review page: {server_url}
-
-This email was auto-generated by Paper Research.
+        text_body = f"""Arxiv Paper Research - {today}
+关键词: {keywords_str}
+重要: {important} | 值得关注: {useful} | 待审核: {pending} | 总计: {total}
+审阅页面: {server_url}
 """
-    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+        msg.attach(MIMEText(text_body, "plain", "utf-8"))
 
-    try:
-        with smtplib.SMTP_SSL(email_cfg.smtp_host, email_cfg.smtp_port) as server:
-            server.login(email_cfg.username, email_cfg.password)
-            server.send_message(msg)
-        print("  [i] Email sent")
-        return True
-    except Exception as e:
-        print(f"  [i] Email send failed: {e}")
-        return False
+        try:
+            with smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port) as server:
+                server.login(cfg.username, cfg.password)
+                server.send_message(msg)
+            print("  [i] 邮件通知发送成功")
+            return True
+        except Exception as e:
+            print(f"  [i] 邮件发送失败: {e}")
+            return False
+
+
+def _remark_color(remark: str) -> str:
+    return {
+        "important": "#e74c3c",
+        "useful": "#f39c12",
+        "browse": "#3498db",
+        "skip": "#95a5a6",
+    }.get(remark, "#95a5a6")

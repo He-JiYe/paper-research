@@ -1,60 +1,81 @@
 """共享的抓取管道：供 CLI (cmd_fetch) 和 Web API (_do_fetch) 复用
 
-通过 DataSource 工厂与具体数据源解耦 —— settings.source 决定使用哪个后端。
+职责：
+1. 从 Arxiv 抓取论文（不下载 PDF）
+2. LLM 初筛评分
+3. 存入 SQLite 数据库
+4. 生成 HTML
+
+注意：本管道不发送邮件。邮件只由调度器（每日定时抓取后）或
+用户手动触发（CLI notify / 页面推送按钮）发送。
 """
 
 import asyncio
-import datetime
+import logging
+
+from src.config import OUTPUT_DIR
+from src.scorer import PaperScorer
+
+logger = logging.getLogger(__name__)
 
 
 async def run_fetch_pipeline(
-    conn, settings, keywords, max_results, mode="incremental", dry_run=False
+    settings,
+    keywords,
+    max_results,
+    db=None,
+    mode="incremental",
+    dry_run=False,
 ):
-    """核心抓取管道
+    """核心抓取管道（数据写入 SQLite DB）
 
-    执行顺序: 构建 skip_ids → 抓取 → 去重+版本检测 → 入库
-              → LLM 摘要 → 生成 HTML → 记日志
+    执行顺序: 构建 skip_ids → 抓取 → 去重 → LLM 评分 → 写入 DB → 生成 HTML
 
     Args:
-        conn:         数据库连接
-        settings:     配置对象（含 source, fetch, llm 子配置）
-        keywords:     关键词列表 [{"keyword": ..., "arxiv_cats": ..., "active": ...}, ...]
+        settings:     配置对象
+        keywords:     关键词列表
         max_results:  每关键词最大结果数
+        db:           PaperDB 实例（None 时自动创建）
         mode:         "incremental"（增量）| "historical"（全量）
         dry_run:      True 时只抓取不写入
 
     Returns:
-        dict: fetched / new / updated / summarized 计数及论文列表
+        dict: 统计数据
     """
-    # 函数内导入以便测试能 patch 依赖
-    from src.agents import PaperScorer
-    from src.config import OUTPUT_DIR
-    from src.db import (
-        get_paper,
-        insert_fetch_log,
-        insert_paper,
-        touch_paper,
-        update_paper_summary,
-        update_paper_version,
-    )
     from src.network.factory import get_source
 
-    today = datetime.date.today().isoformat()
+    if db is None:
+        from src.db import PaperDB
+        db = PaperDB()
+
     is_historical = mode == "historical"
 
     # ── 1. 通过工厂获取数据源 ──────────────────────────────
     source = get_source(settings)
 
     # ── 2. 构建 skip_ids ──────────────────────────────────
-    skip_ids = set()
-    for kw in keywords:
-        cursor = conn.execute(
-            "SELECT arxiv_id FROM papers WHERE keyword_match LIKE ?",
-            (f"%{kw['keyword']}%",),
+    # 同时检查 DB 和 Zotero
+    from src.zotero import ZoteroClient
+
+    skip_ids: set[str] = set()
+
+    # 从 DB 获取已有 ID
+    existing_db = db.get_existing_arxiv_ids()
+    skip_ids |= existing_db
+
+    # 从 Zotero 获取已有 ID
+    try:
+        zotero = ZoteroClient(
+            settings.zotero.api_key,
+            settings.zotero.library_id,
+            settings.zotero.library_type,
         )
-        existing_ids = {row[0] for row in cursor.fetchall()}
-        skip_ids |= existing_ids
-        print(f"    [{kw['keyword']}]: 已有 {len(existing_ids)} 篇")
+        existing_zotero = zotero.get_existing_arxiv_ids()
+        skip_ids |= existing_zotero
+        for kw in keywords:
+            print(f"    [{kw.keyword}]: Zotero 已有 {len(existing_zotero)} 篇 + DB {len(existing_db)} 篇")
+    except Exception as e:
+        print(f"  [!] 连接 Zotero 失败（仅用 DB 去重）: {e}")
 
     # ── 3. 抓取 ───────────────────────────────────────────
     print(f"  📡 开始抓取 ({mode}模式，跳过 {len(skip_ids)} 篇已有)...")
@@ -66,57 +87,26 @@ async def run_fetch_pipeline(
         skip_ids=skip_ids,
     )
 
-    # dry-run：只抓取不写入
+    if not all_papers:
+        print("  📭 无新论文")
+        return {"fetched": 0, "new": 0, "summarized": 0, "papers_fetched": []}
+
+    # dry-run
     if dry_run:
         print(f"  📄 共获取 {len(all_papers)} 篇论文")
         for p in all_papers[:10]:
             print(f"    - [{p['arxiv_id']}] {p['title'][:80]}")
         if len(all_papers) > 10:
             print(f"    ... 还有 {len(all_papers) - 10} 篇")
-        return {
-            "fetched": len(all_papers),
-            "new": 0,
-            "updated": 0,
-            "summarized": 0,
-            "papers_fetched": all_papers,
-            "papers_new": [],
-            "papers_updated": [],
-        }
+        return {"fetched": len(all_papers), "new": 0, "papers_fetched": all_papers}
 
-    # ── 4. 去重 + 版本检测 ────────────────────────────────
-    new_papers = []
-    updated_papers = []
-    for paper in all_papers:
-        aid = paper["arxiv_id"]
-        existing = get_paper(conn, aid)
+    print(f"  📊 获取: {len(all_papers)} 篇新论文")
 
-        if existing is None:
-            paper["fetch_date"] = today
-            insert_paper(conn, paper)
-            new_papers.append(paper)
-        elif (
-            existing["arxiv_updated"]
-            and paper.get("arxiv_updated", "") > existing["arxiv_updated"]
-        ):
-            update_paper_version(
-                conn,
-                aid,
-                paper.get("version", 1),
-                paper["arxiv_updated"],
-                today,
-            )
-            updated_papers.append(paper)
-        else:
-            touch_paper(conn, aid, today)
-
-    print(
-        f"  📊 抓取: {len(all_papers)} 篇 | 新增: {len(new_papers)} 篇 | 更新: {len(updated_papers)} 篇"
-    )
-
-    # ── 5. LLM 摘要 ───────────────────────────────────────
-    to_summarize = new_papers + updated_papers
-    if to_summarize:
-        print(f"  [*] Summarizing {len(to_summarize)} papers...")
+    # ── 4. LLM 评分 ───────────────────────────────────────
+    to_score = all_papers
+    summarized_count = 0
+    if to_score:
+        print(f"  [*] 正在 LLM 初筛 {len(to_score)} 篇论文...")
         api_key = settings.llm.api_key
         scorer = PaperScorer(
             api_key=api_key,
@@ -128,77 +118,66 @@ async def run_fetch_pipeline(
 
         results: list = []
         if api_key:
-            # 异步批量评分，失败则回退到串行
             try:
-                results = await scorer.score_batch_async(to_summarize)
+                results = await scorer.score_batch_async(to_score)
             except Exception as e:
-                print(f"  [!] Async summary failed, falling back to serial: {e}")
-                try:
-                    results = scorer.score_batch(to_summarize)
-                except Exception as e2:
-                    print(f"  [!] Sync summary also failed: {e2}")
+                print(f"  [!] 异步评分失败，回退到串行: {e}")
+                results = scorer.score_batch(to_score)
         else:
-            # 无 API key：逐篇串行评分，每篇独立容错
             loop = asyncio.get_running_loop()
             results = []
-            for paper in to_summarize:
-                try:
-                    result = await loop.run_in_executor(
-                        None,
-                        scorer.score,
-                        paper.get("title", ""),
-                        paper.get("abstract", ""),
-                        paper.get("categories", ""),
-                        paper.get("keyword_match", ""),
-                    )
-                except Exception as e:
-                    print(f"    [!] Fallback failed [{paper['arxiv_id']}]: {e}")
-                    result = None
+            for paper in to_score:
+                result = await loop.run_in_executor(
+                    None,
+                    scorer.score,
+                    paper.get("title", ""),
+                    paper.get("abstract", ""),
+                    paper.get("categories", ""),
+                    paper.get("keyword_match", ""),
+                )
                 results.append(result)
 
-        count = 0
-        for paper, result in zip(to_summarize, results, strict=False):
+        # 将 LLM 结果写入 paper dict
+        for paper, result in zip(to_score, results, strict=False):
             if result:
-                update_paper_summary(
-                    conn,
-                    paper["arxiv_id"],
-                    result.summary,
-                    result.remark,
-                    result.reason,
-                    result.score,
-                )
-                count += 1
-        print(f"  [OK] Summary done: {count}/{len(to_summarize)}")
-    else:
-        print("  [.] No new papers to summarize")
+                paper["llm_summary"] = result.summary
+                paper["llm_remark"] = result.remark
+                paper["llm_reason"] = result.reason
+                paper["llm_score"] = result.score
+                paper["status"] = "summarized"
+            else:
+                paper["status"] = "new"
+
+        summarized_count = sum(1 for r in results if r)
+        print(f"  [OK] 初筛完成: {summarized_count}/{len(to_score)} 篇")
+
+    # ── 5. 写入数据库 ────────────────────────────────────
+    new_count = db.add_papers(to_score)
+    print(f"  [OK] 已写入数据库: {new_count}/{len(to_score)} 篇")
 
     # ── 6. 生成 HTML ──────────────────────────────────────
     print("  [i] 生成 HTML...")
-    from src.db import get_papers_for_summary as gfs
-    from src.serve.renderer import generate_notes_index_html, generate_summary_html
+    from src.serve.renderer import generate_summary_html
 
-    grouped = gfs(conn)
-    generate_summary_html(grouped, OUTPUT_DIR)
-    all_p = list(conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500"))
-    generate_notes_index_html([dict(r) for r in all_p], OUTPUT_DIR)
+    pending = db.get_pending()
+    marked = db.get_marked()
+    lurk = db.get_lurk()
+    generate_summary_html(
+        {"unmarked": pending, "marked": marked, "lurk": lurk},
+        OUTPUT_DIR,
+    )
 
-    # ── 7. 记录日志 ──────────────────────────────────────
-    insert_fetch_log(
-        conn,
+    # ── 7. 记录抓取日志 ──────────────────────────────────
+    db.add_fetch_log(
         keywords_used=len(keywords),
         papers_fetched=len(all_papers),
-        papers_new=len(new_papers),
-        papers_updated=len(updated_papers),
-        papers_summarized=len(to_summarize),
-        status="success",
+        papers_new=new_count,
+        papers_summarized=summarized_count,
     )
 
     return {
         "fetched": len(all_papers),
-        "new": len(new_papers),
-        "updated": len(updated_papers),
-        "summarized": len(to_summarize),
+        "new": new_count,
+        "summarized": summarized_count,
         "papers_fetched": all_papers,
-        "papers_new": new_papers,
-        "papers_updated": updated_papers,
     }

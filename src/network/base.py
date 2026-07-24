@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any
 
 
@@ -27,8 +26,6 @@ class BaseSource(ABC):
             async def fetch_by_ids(self, ids):
                 ...
             async def search(self, query, ...):
-                ...
-            async def download_pdf(self, paper_id, output_dir):
                 ...
 
         register_source("pubmed", PubmedSource)
@@ -94,17 +91,3 @@ class BaseSource(ABC):
         """
         ...
 
-    # ── PDF 下载 ────────────────────────────────────────────────
-
-    @abstractmethod
-    async def download_pdf(self, paper_id: str, output_dir: Path) -> Path:
-        """下载论文 PDF 到本地。
-
-        Args:
-            paper_id:   数据源专有论文 ID
-            output_dir: 输出根目录
-
-        Returns:
-            下载后的 PDF 文件路径
-        """
-        ...

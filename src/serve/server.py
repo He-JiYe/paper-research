@@ -1,29 +1,59 @@
-"""FastAPI 本地 Web 服务：统一入口（summary、notes、API）"""
+"""FastAPI 本地 Web 服务：核心审阅工作流
+
+专注核心功能：
+1. 论文审阅首页（待审阅 + 已处理概览）
+2. PDF 代理（手动查看，抓取时不自动下载）
+3. 标记论文（审阅决策 → 导入 Zotero + 设置 shortTitle）
+4. 触发抓取
+5. 统计数据
+"""
 
 import asyncio
 import contextlib
-import html
+import json
 import logging
 import re
-from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.config import OUTPUT_DIR, ROOT_DIR
+from src.db import PaperDB
+from src.zotero import ZoteroClient
+from src.zotero.models import COLLECTION_ROOT, generate_short_title
 
 STATIC_DIR = ROOT_DIR / "static"
 
-app = FastAPI(title="Paper Research", version="0.2.0")
-
-# 挂载静态文件
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-_db_conn = None
+_db_zotero: ZoteroClient | None = None
 _settings = None
 _logger = None
+_scheduler = None
+
+_sse_clients: list["asyncio.Queue[dict]"] = []
+
+
+@contextlib.asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    global _scheduler
+    if _settings:
+        try:
+            from src.serve.scheduler import FetchScheduler
+
+            _scheduler = FetchScheduler(_settings, _db_zotero)
+            # 必须保留强引用：否则任务可能被 GC，调度器静默死亡
+            _scheduler._task = asyncio.create_task(_scheduler.start())
+        except Exception as e:
+            print(f"  ⚠️ 调度器启动失败: {e}")
+    yield
+    if _scheduler:
+        _scheduler.stop()
+
+
+app = FastAPI(title="Paper Research", version="0.5.0", lifespan=_app_lifespan)
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 def init_logging():
@@ -42,9 +72,9 @@ def init_logging():
         _logger.addHandler(handler)
 
 
-def set_db_conn(conn):
-    global _db_conn
-    _db_conn = conn
+def set_zotero_client(zotero: ZoteroClient):
+    global _db_zotero
+    _db_zotero = zotero
 
 
 def set_settings(settings):
@@ -52,532 +82,227 @@ def set_settings(settings):
     _settings = settings
 
 
-# ─── Helper: path traversal safety ────────────────────────
-
-
-def _safe_arxiv_path(base_dir: Path, arxiv_id: str, *parts: str) -> Path:
-    """安全拼接 arXiv 路径，防止路径遍历攻击。
-
-    Args:
-        base_dir: 基础目录（通常为 OUTPUT_DIR）
-        arxiv_id: arXiv ID（将替换 / 为 _ 兼容旧格式）
-        *parts:  路径后缀（如 "note.md", "figures", filename）
-
-    Returns:
-        解析后的安全路径
-
-    Raises:
-        ValueError: 检测到路径遍历时抛出
-    """
-    # 替换旧格式中的 / 防止路径穿越
-    safe_id = arxiv_id.replace("/", "_")
-    for part in parts:
-        if ".." in part or "/" in part or "\\" in part:
-            raise ValueError(f"Invalid path component: {part!r}")
-    parts_path = "/".join(parts)
-    full_path = (base_dir / "notes" / safe_id / parts_path).resolve()
-    base_resolved = base_dir.resolve()
-    if not str(full_path).startswith(str(base_resolved)):
-        raise ValueError(f"Path traversal detected: arxiv_id={arxiv_id!r}")
-    return full_path
-
-
-# ─── Helper: simple markdown to HTML ──────────────────────
-
-
-def _md_to_html(text: str, arxiv_id: str = "") -> str:
-    """Convert markdown to HTML, resolving figure paths against arxiv_id."""
-    fig_prefix = f"/notes/{arxiv_id}/figures/" if arxiv_id else ""
-
-    def _fix_img(m):
-        alt, src = m.group(1), m.group(2)
-        if src.startswith("figures/"):
-            src = f"{fig_prefix}{src.split('/', 1)[1]}"
-        return f'<img src="{html.escape(src)}" alt="{html.escape(alt)}" style="max-width:100%">'
-
-    def _fix_link(m):
-        text, href = m.group(1), m.group(2)
-        if href.startswith("figures/"):
-            href = f"{fig_prefix}{href.split('/', 1)[1]}"
-        return f'<a href="{html.escape(href)}">{html.escape(text)}</a>'
-
-    lines = text.split("\n")
-    html_parts = []
-    in_list = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.startswith("<!--") and stripped.endswith("-->"):
-            html_parts.append(f"<!--{html.escape(stripped[4:-3])}-->")
-            continue
-
-        if stripped.startswith("## "):
-            html_parts.append("</ul>" if in_list else "")
-            in_list = False
-            html_parts.append(f"<h2>{html.escape(stripped[3:])}</h2>")
-            continue
-        if stripped.startswith("# "):
-            html_parts.append("</ul>" if in_list else "")
-            in_list = False
-            html_parts.append(f"<h1>{html.escape(stripped[2:])}</h1>")
-            continue
-
-        if stripped == "---":
-            html_parts.append("</ul>" if in_list else "")
-            in_list = False
-            html_parts.append("<hr>")
-            continue
-
-        if stripped.startswith("- "):
-            if not in_list:
-                html_parts.append("<ul>")
-                in_list = True
-            item = html.escape(stripped[2:])
-            item = re.sub(r"\*\*(.+?)\*\*", lambda m: f"<strong>{m.group(1)}</strong>", item)
-            item = re.sub(r"!\[(.+?)\]\((.+?)\)", _fix_img, item)
-            item = re.sub(r"\[(.+?)\]\((.+?)\)", _fix_link, item)
-            html_parts.append(f"<li>{item}</li>")
-            continue
-        if in_list:
-            html_parts.append("</ul>")
-            in_list = False
-
-        if not stripped:
-            html_parts.append("<br>")
-            continue
-
-        if in_list:
-            html_parts.append("</ul>")
-            in_list = False
-        paragraph = html.escape(line)
-        paragraph = re.sub(r"\*\*(.+?)\*\*", lambda m: f"<strong>{m.group(1)}</strong>", paragraph)
-        paragraph = re.sub(r"!\[(.+?)\]\((.+?)\)", _fix_img, paragraph)
-        paragraph = re.sub(r"\[(.+?)\]\((.+?)\)", _fix_link, paragraph)
-        html_parts.append(f"<p>{paragraph}</p>")
-
-    if in_list:
-        html_parts.append("</ul>")
-
-    return "\n".join(html_parts)
+# ─── Helper ────────────────────────────────────────────────
 
 
 def _log(level: str, msg: str):
-    """写入日志文件"""
     if _logger:
         getattr(_logger, level, _logger.info)(msg)
     print(f"  [{level.upper()}] {msg}")
 
 
-# ─── Summary ──────────────────────────────────────────────
+# ─── 首页：论文审阅概览 ────────────────────────────────────
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    """动态渲染 HTML summary"""
-    from src.db import get_papers_for_summary
     from src.serve.renderer import generate_summary_html
 
-    if not _db_conn:
-        return HTMLResponse(content="<h1>Database not initialized</h1>", status_code=500)
+    db = PaperDB()
+    pending = db.get_pending()
+    marked = db.get_marked()
+    lurk = db.get_lurk()
 
-    grouped = get_papers_for_summary(_db_conn)
+    grouped = {
+        "unmarked": pending,
+        "marked": marked,
+        "lurk": lurk,
+    }
     path = generate_summary_html(grouped)
-    html = path.read_text(encoding="utf-8")
-    return HTMLResponse(content=html)
+    html_ = path.read_text(encoding="utf-8")
+    return HTMLResponse(content=html_)
 
 
-# ─── Notes Gallery ───────────────────────────────────────
+# ─── PDF 代理 ─────────────────────────────────────────────
 
 
-@app.get("/notes", response_class=HTMLResponse)
-async def notes_index():
-    """动态渲染笔记画廊页"""
-    from src.serve.renderer import generate_notes_index_html
-
-    if not _db_conn:
-        return HTMLResponse(content="<h1>Database not initialized</h1>", status_code=500)
-    papers = [
-        dict(r) for r in _db_conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500")
-    ]
-    path = generate_notes_index_html(papers, OUTPUT_DIR)
-    html = path.read_text(encoding="utf-8")
-    return HTMLResponse(content=html)
-
-
-@app.get("/notes/{arxiv_id}", response_class=HTMLResponse)
-async def note_detail(arxiv_id: str):
-    """笔记页: 左栏PDF链接 + 右栏笔记内容(查看/编辑合并)"""
-    try:
-        note_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "note.md")
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
-    if not note_path.exists():
-        return HTMLResponse(content=f"<h1>Note not found: {arxiv_id}</h1>", status_code=404)
-
-    raw = note_path.read_text(encoding="utf-8")
-    body_html = _md_to_html(raw, arxiv_id)
-
-    # 论文元数据
-    paper = None
-    if _db_conn:
-        from src.db import get_paper
-
-        paper = get_paper(_db_conn, arxiv_id)
-
-    # 标题优先级: note_short_title(DB) > h1(笔记正文) > arxiv_id 兜底
-    short_title = paper.get("note_short_title", "") if paper else ""
-    title_match = re.search(r"<h1>(.+?)</h1>", body_html)
-    h1_title = title_match.group(1) if title_match else ""
-    title = short_title or h1_title or arxiv_id
-
-    from src.serve.renderer import render_note_detail_html
-
-    html = render_note_detail_html(
-        arxiv_id=arxiv_id,
-        title=title,
-        body_html=body_html,
-        paper=paper,
-    )
-    return HTMLResponse(content=html)
+_ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
 
 
 @app.get("/api/pdf/{arxiv_id}")
 async def proxy_pdf(arxiv_id: str):
-    """代理 PDF：优先本地 → 下载 → HTML fallback"""
-    try:
-        local_pdf = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "paper.pdf")
-    except ValueError:
+    """重定向到 arxiv PDF（不下载缓存）。"""
+    if not _ARXIV_ID_RE.match(arxiv_id):
         raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
-    if local_pdf.exists() and local_pdf.stat().st_size > 10000:
-        from fastapi.responses import FileResponse
-
-        return FileResponse(
-            str(local_pdf),
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"inline; filename={arxiv_id}.pdf",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-    # 本地无 PDF，尝试下载
-    from src.network.factory import get_source
-
-    try:
-        pdf_path = await get_source(_settings).download_pdf(arxiv_id, OUTPUT_DIR)
-        from fastapi.responses import FileResponse
-
-        return FileResponse(
-            str(pdf_path),
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"inline; filename={arxiv_id}.pdf",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-    except Exception:
-        # 下载失败 → HTML fallback 页
-        paper = None
-        if _db_conn:
-            from src.db import get_paper
-
-            paper = get_paper(_db_conn, arxiv_id)
-        p_title = paper.get("title", arxiv_id) if paper else arxiv_id
-        html = f"""<html><body style="font-family:sans-serif;padding:40px;text-align:center">
-            <h2>PDF not available</h2>
-            <p>{p_title}</p>
-            <a href="https://arxiv.org/abs/{arxiv_id}" target="_blank">View on Arxiv</a>
-            <br><br>
-            <a href="https://arxiv.org/pdf/{arxiv_id}" target="_blank">Download from Arxiv</a>
-            </body></html>"""
-        return HTMLResponse(content=html)
+    return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}")
 
 
-@app.get("/notes/{arxiv_id}/figures/{filename}")
-async def note_figure(arxiv_id: str, filename: str):
-    """提供笔记中的图表文件"""
-    try:
-        fig_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "figures", filename)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid path")
-    if not fig_path.exists():
-        raise HTTPException(status_code=404)
-    from fastapi.responses import FileResponse
-
-    return FileResponse(str(fig_path))
+@app.get("/api/scheduler/status")
+async def api_scheduler_status():
+    """返回内置调度器状态（上次/下次抓取时间）。"""
+    if not _scheduler:
+        return JSONResponse(content={"enabled": False, "reason": "scheduler not started"})
+    return JSONResponse(content=_scheduler.status)
 
 
-# ─── Mark API ─────────────────────────────────────────────
+# ─── 标记 API ─────────────────────────────────────────────
 
 
 @app.post("/mark")
 async def mark_paper(
     arxiv_id: str = Form(...),
     mark_type: str = Form(...),
-    force: bool = Form(False),
+    short_title: str = Form(""),
 ):
-    """标记论文 API（支持翻标记，force=true 强制重写笔记）"""
-    from src.db import get_paper
-    from src.db import mark_paper as db_mark
+    """标记论文（纯 DB 操作，不入 Zotero）。
 
-    if not _db_conn:
-        raise HTTPException(status_code=500, detail="Database not initialized")
-
-    paper = get_paper(_db_conn, arxiv_id)
-    if not paper:
-        raise HTTPException(status_code=404, detail=f"Paper not found: {arxiv_id}")
-
-    if mark_type not in ("ignore", "skim", "deep_read", "lurk", "pending"):
+    - ignore: 忽略
+    - lurk: 延后处理
+    - pending: 取消标记，放回待审阅
+    """
+    if mark_type not in ("ignore", "lurk", "pending"):
         raise HTTPException(status_code=400, detail=f"Invalid mark type: {mark_type}")
 
-    # 翻标记检测
-    old_mark = paper.get("user_mark")
-    if old_mark and old_mark != mark_type:
-        _log("info", f"Re-mark: {arxiv_id} {old_mark} -> {mark_type}")
+    _log("info", f"Marking {arxiv_id} as {mark_type}")
 
-    db_mark(_db_conn, arxiv_id, mark_type)
-    _log("info", f"Marked {arxiv_id} as {mark_type}")
-
-    if mark_type in ("skim", "deep_read"):
-        try:
-            note_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "note.md")
-        except ValueError:
-            _log("error", f"Invalid arxiv_id for note path: {arxiv_id}")
-            raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
-        if note_path.exists() and not force:
-            _log("info", f"Note exists, skip: {arxiv_id}")
-        else:
-            asyncio.create_task(_extract_and_note(arxiv_id, mark_type))
-
+    db = PaperDB()
+    db.update_mark(arxiv_id, mark_type, short_title=short_title)
     asyncio.create_task(_refresh_snapshot())
-    asyncio.create_task(_refresh_notes_index())
-
     return JSONResponse(content={"status": "ok", "arxiv_id": arxiv_id, "mark_type": mark_type})
 
 
-# ─── Note Editor API ──────────────────────────────────────
+# ─── Zotero API ────────────────────────────────────────────
 
 
-@app.get("/api/note/{arxiv_id}")
-async def get_note(arxiv_id: str):
-    """获取笔记原始 markdown 内容（供编辑器加载）"""
-    try:
-        note_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "note.md")
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
-    if not note_path.exists():
-        return HTMLResponse(content="", status_code=404)
-    content = note_path.read_text(encoding="utf-8")
-    return HTMLResponse(content=content)
+@app.get("/api/zotero/collections")
+async def api_zotero_collections(include_project: bool = False):
+    """获取 Zotero 分类列表，供前端导入下拉框使用。
+
+    默认排除项目自动维护的 "Paper Research" 分类树
+    （导入时论文本就会自动归入 Inbox/Keywords，无需在下拉框重复展示）；
+    include_project=true 时返回全部分类。
+    """
+    if not _db_zotero:
+        raise HTTPException(status_code=500, detail="Zotero not connected")
+    # pyzotero 为同步库，放线程执行避免阻塞事件循环
+    collections = await asyncio.to_thread(_db_zotero.get_all_collections)
+    if not include_project:
+        collections = [
+            c
+            for c in collections
+            if c["path"] != COLLECTION_ROOT
+            and not c["path"].startswith(f"{COLLECTION_ROOT} / ")
+        ]
+    return JSONResponse(content={"collections": collections})
 
 
-@app.put("/api/note/{arxiv_id}")
-async def save_note(arxiv_id: str, request: Request):
-    """保存笔记内容（从在线编辑器写入本地 .md 文件）"""
-    body_bytes = await request.body()
-    body = body_bytes.decode("utf-8")
-    try:
-        note_path = _safe_arxiv_path(OUTPUT_DIR, arxiv_id, "note.md")
-        note_dir = note_path.parent
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid arxiv_id: {arxiv_id}")
-    note_dir.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(body, encoding="utf-8")
-    print(f"  [OK] Note saved: {arxiv_id}")
-    return JSONResponse(content={"status": "ok", "arxiv_id": arxiv_id})
-
-
-# ─── Categories API ───────────────────────────────────────
-
-
-@app.get("/api/categories")
-async def list_categories():
-    """获取所有分类"""
-    from src.db import get_all_categories
-
-    if not _db_conn:
-        raise HTTPException(status_code=500, detail="Not initialized")
-    return JSONResponse(content=get_all_categories(_db_conn))
-
-
-@app.post("/api/categories")
-async def create_category(name: str = Form(...)):
-    """新建自定义分类"""
-    from src.db import add_category
-
-    if not _db_conn:
-        raise HTTPException(status_code=500, detail="Not initialized")
-    cat_id = add_category(_db_conn, name)
-    return JSONResponse(content={"id": cat_id, "name": name})
-
-
-@app.delete("/api/categories/{category_id}")
-async def delete_category(category_id: int):
-    """删除自定义分类"""
-    from src.db import delete_category
-
-    if not _db_conn:
-        raise HTTPException(status_code=500, detail="Not initialized")
-    ok = delete_category(_db_conn, category_id)
-    asyncio.create_task(_refresh_notes_index())
-    return JSONResponse(content={"deleted": ok})
-
-
-@app.post("/api/note/{arxiv_id}/categories")
-async def set_note_categories_api(arxiv_id: str, request: Request):
-    """设置笔记多分类（逗号分隔 ID，如 \"1,3,5\"，空字符串清空）"""
-    from src.db import set_note_categories
-
-    if not _db_conn:
-        raise HTTPException(status_code=500, detail="Not initialized")
-    body_bytes = await request.body()
-    body = body_bytes.decode("utf-8")
-    ids = [int(x.strip()) for x in body.split(",") if x.strip()]
-    set_note_categories(_db_conn, arxiv_id, ids)
-    return JSONResponse(content={"status": "ok", "categories": ids})
-
-
-@app.post("/api/note/{arxiv_id}/short_info")
-async def update_short_info(
-    arxiv_id: str, short_title: str = Form(""), description: str = Form("")
+@app.post("/api/zotero/import")
+async def api_zotero_import(
+    arxiv_id: str = Form(...),
+    collection_key: str = Form(""),
+    short_title: str = Form(""),
 ):
-    """更新笔记短标题和说明"""
-    from src.db import update_note_short_info
+    """导入论文到 Zotero，指定分类和 shortTitle。
+    """
+    if not _db_zotero:
+        raise HTTPException(status_code=500, detail="Zotero not connected")
 
-    if not _db_conn:
-        raise HTTPException(status_code=500, detail="Not initialized")
-    update_note_short_info(_db_conn, arxiv_id, short_title, description)
-    return JSONResponse(content={"status": "ok"})
+    _log("info", f"Zotero import: {arxiv_id} -> key:{collection_key}")
 
+    db = PaperDB()
+    paper = db.get_paper(arxiv_id)
+    if not paper:
+        from src.network.factory import get_source
 
-# ─── Data API ─────────────────────────────────────────────
+        source = get_source(_settings)
+        papers = await source.fetch_by_ids([arxiv_id])
+        if not papers:
+            raise HTTPException(status_code=404, detail=f"Paper not found: {arxiv_id}")
+        paper = papers[0]
+        if not paper.get("llm_remark"):
+            from src.scorer import PaperScorer
 
+            scorer = PaperScorer(
+                api_key=_settings.llm.api_key,
+                api_base=_settings.llm.api_base,
+                model=_settings.llm.model,
+                temperature=_settings.llm.temperature,
+                max_tokens=_settings.llm.max_tokens,
+            )
+            # 同步 LLM 调用放线程执行，避免阻塞事件循环
+            result = await asyncio.to_thread(
+                scorer.score, paper.get("title", ""), paper.get("abstract", "")
+            )
+            if result:
+                paper["llm_summary"] = result.summary
+                paper["llm_remark"] = result.remark
+                paper["llm_reason"] = result.reason
+                paper["llm_score"] = result.score
 
-@app.get("/api/keywords")
-async def get_keywords():
-    """读取 keywords.json"""
-    from src.config import load_keywords
+    existing = await asyncio.to_thread(_db_zotero.get_item_by_arxiv_id, arxiv_id)
+    if existing:
+        item_key = existing["data"]["key"]
+        _log("info", f"Paper already in Zotero: {item_key}")
+    else:
+        from src.scorer import LLMResult
 
-    return JSONResponse(content=load_keywords())
+        llm_result = None
+        if paper.get("llm_remark"):
+            llm_result = LLMResult(
+                summary=paper.get("llm_summary", ""),
+                remark=paper.get("llm_remark", ""),
+                reason=paper.get("llm_reason", ""),
+                score=paper.get("llm_score", 0),
+            )
+        item_key = await asyncio.to_thread(_db_zotero.create_item, paper, llm_result)
+        if not item_key:
+            raise HTTPException(status_code=500, detail="Failed to create Zotero item")
 
+    final_title = short_title or generate_short_title(paper)
+    await asyncio.to_thread(_db_zotero.set_short_title, item_key, final_title)
 
-@app.post("/api/keywords")
-async def save_keywords(request: Request):
-    """保存 keywords.json"""
-    from src.config import save_keywords
+    if collection_key:
+        # 按 key 精确归档到已有分类（不创建新分类）
+        await asyncio.to_thread(_db_zotero.add_to_collection, item_key, collection_key)
 
-    body = await request.json()
-    if not isinstance(body, list):
-        raise HTTPException(status_code=400, detail="Expected a list of keyword objects")
-    save_keywords(body)
-    return JSONResponse(content={"status": "ok", "count": len(body)})
+    # PDF 附件：下载 arXiv PDF 并上传为子附件。
+    # 失败不阻塞导入（Zotero 存储配额/网络问题不应影响元数据导入）
+    # pdf_attached = False
+    # try:
+    #     has_pdf = await asyncio.to_thread(_db_zotero.has_pdf_attachment, item_key)
+    #     if not has_pdf:
+    #         import tempfile
 
+    #         from src.network.arxiv import download_pdf
 
-# ─── Settings API ──────────────────────────────────────────
+    #         with tempfile.TemporaryDirectory() as tmpdir:
+    #             pdf_path = await asyncio.to_thread(
+    #                 download_pdf, arxiv_id, tmpdir, paper.get("version", 0) or 0
+    #             )
+    #             await asyncio.to_thread(
+    #                 _db_zotero.attach_pdf, item_key, str(pdf_path), "Full Text PDF"
+    #             )
+    #         pdf_attached = True
+    # except Exception as e:
+    #     _log("warning", f"PDF 附件上传失败（导入本身成功）: {arxiv_id}: {e}")
 
-
-@app.get("/api/settings")
-async def get_settings():
-    """获取当前 fetch 设置"""
-    if not _settings:
-        raise HTTPException(status_code=500, detail="Not initialized")
+    # 导入成功：标记为已处理（从待审阅池移除，记入已处理组）
+    db.update_mark(arxiv_id, "imported", short_title=final_title, zotero_key=item_key)
+    _log("info", f"Zotero import complete: {arxiv_id} -> {item_key} (pdf={False})")
+    asyncio.create_task(_refresh_snapshot())
     return JSONResponse(
         content={
-            "target_new_per_keyword": _settings.fetch.target_new_per_keyword,
-            "lookback_days": _settings.fetch.lookback_days,
-            "max_concurrent_requests": _settings.fetch.max_concurrent_requests,
+            "status": "ok",
+            "arxiv_id": arxiv_id,
+            "zotero_key": item_key,
+            "pdf_attached": False,
         }
     )
 
 
-@app.put("/api/settings")
-async def update_settings(request: Request):
-    """更新 arxiv 设置并持久化到 settings.json"""
-    if not _settings:
-        raise HTTPException(status_code=500, detail="Not initialized")
-    import json
-
-    from src.config import CONFIG_DIR
-
-    body = await request.json()
-    settings_path = CONFIG_DIR / "settings.json"
-
-    existing = (
-        json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
-    )
-    if "fetch" not in existing:
-        existing["fetch"] = {}
-
-    if "target_new_per_keyword" in body:
-        try:
-            val = int(body["target_new_per_keyword"])
-        except (ValueError, TypeError):
-            raise HTTPException(status_code=400, detail="target_new_per_keyword must be an integer")
-        existing["fetch"]["target_new_per_keyword"] = val
-        _settings.fetch.target_new_per_keyword = val
-    if "lookback_days" in body:
-        try:
-            val = int(body["lookback_days"])
-        except (ValueError, TypeError):
-            raise HTTPException(status_code=400, detail="lookback_days must be an integer")
-        existing["fetch"]["lookback_days"] = val
-        _settings.fetch.lookback_days = val
-
-    settings_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
-    _log(
-        "info",
-        f"Settings updated: target_new_per_keyword={_settings.fetch.target_new_per_keyword}, lookback_days={_settings.fetch.lookback_days}",
-    )
-    return JSONResponse(content={"status": "ok"})
-
-
-@app.get("/api/stats")
-async def stats():
-    """获取统计信息"""
-    from src.db import get_stats
-
-    if not _db_conn:
-        raise HTTPException(status_code=500, detail="Database not initialized")
-    return JSONResponse(content=get_stats(_db_conn))
-
-
-@app.get("/api/papers")
-async def papers():
-    """获取论文列表"""
-    from src.db import get_papers_for_summary
-
-    if not _db_conn:
-        raise HTTPException(status_code=500, detail="Database not initialized")
-    return JSONResponse(content=get_papers_for_summary(_db_conn))
-
-
-# ─── Fetch Status ────────────────────────────────────────
-
-_sse_clients: list["asyncio.Queue[dict]"] = []
-
-
-def _notify_sse_clients(data: dict):
-    """推送结果给所有等待的 SSE 客户端"""
-    for q in _sse_clients[:]:
-        with contextlib.suppress(Exception):
-            q.put_nowait(data)
+# ─── 抓取 API ─────────────────────────────────────────────
 
 
 @app.get("/api/fetch-status-stream")
 async def fetch_status_stream():
-    """SSE 端点：后端主动推送抓取结果，前端无需轮询"""
     queue: asyncio.Queue = asyncio.Queue()
     _sse_clients.append(queue)
 
     async def _event_stream():
         try:
             result = await asyncio.wait_for(queue.get(), timeout=300)
-            import json
-
             yield f"data: {json.dumps(result)}\n\n"
         except TimeoutError:
-            import json
-
             yield f"data: {json.dumps({'fetched': 0, 'new': 0, 'timeout': True})}\n\n"
         finally:
             if queue in _sse_clients:
@@ -586,187 +311,217 @@ async def fetch_status_stream():
     return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
 
-# ─── Action API ──────────────────────────────────────────
-
-
 @app.post("/api/fetch")
 async def api_fetch(
-    keyword: str = Form(""),
-    arxiv_cats: str = Form(""),
-    max_results: int = Form(20),
-    mode: str = Form("incremental"),
+    keyword: str = Form(""), max_results: int = Form(20), mode: str = Form("incremental")
 ):
-    """后台抓取
-
-    Args:
-        keyword: 指定关键词，留空则使用所有活跃关键词
-        arxiv_cats: 逗号分隔的 Arxiv 分类
-        max_results: 每关键词最大结果数
-        mode: 抓取模式 — "incremental"（增量，使用 lookback_days）或 "historical"（全量历史，按相关性排序）
-    """
-    if not _db_conn or not _settings:
+    """搜索抓取：指定关键词、数量、模式抓取论文到 pending 池"""
+    if not _settings:
         raise HTTPException(status_code=500, detail="Not initialized")
-
-    asyncio.create_task(_do_fetch_safe(keyword, arxiv_cats, max_results, mode))
-    _log(
-        "info",
-        f"Fetch triggered: keyword={keyword}, cats={arxiv_cats}, max={max_results}, mode={mode}",
-    )
-    return JSONResponse(content={"status": "ok", "message": "Fetch started in background"})
+    asyncio.create_task(_do_fetch_safe(keyword, max_results, mode))
+    return JSONResponse(content={"status": "ok", "message": "Fetch started"})
 
 
-@app.get("/api/search-db")
-async def search_db(q: str = ""):
-    """搜索数据库中已有的论文"""
-    if not q.strip():
-        return JSONResponse(content={"papers": []})
-    if not _db_conn:
-        return JSONResponse(content={"papers": []})
-    like = f"%{q}%"
-    cursor = _db_conn.execute(
-        """SELECT * FROM papers
-           WHERE title LIKE ? OR authors LIKE ? OR arxiv_id LIKE ? OR abstract LIKE ?
-           ORDER BY published DESC LIMIT 50""",
-        (like, like, like, like),
-    )
-    papers = [dict(r) for r in cursor.fetchall()]
-    return JSONResponse(content={"papers": papers, "count": len(papers)})
+@app.post("/api/search-import")
+async def api_search_import(data: dict):
+    """导入选中的论文（仅导入指定的 arxiv_ids）。"""
+    if not _settings:
+        raise HTTPException(status_code=500, detail="Not initialized")
+    arxiv_ids = data.get("arxiv_ids", [])
+    if not arxiv_ids:
+        raise HTTPException(status_code=400, detail="No arxiv_ids provided")
 
-
-@app.get("/api/search")
-async def api_search(q: str = "", max: int = 20, cats: str = ""):
-    """搜索 Arxiv 并返回结果列表"""
-    if not q.strip():
-        return JSONResponse(content={"papers": []})
     from src.network.factory import get_source
 
-    categories = [c.strip() for c in cats.split(",") if c.strip()] if cats else None
-    papers = await get_source(_settings).search(q.strip(), min(max, 100), categories)
-    return JSONResponse(content={"papers": papers, "count": len(papers)})
+    source = get_source(_settings)
+    papers = await source.fetch_by_ids(arxiv_ids)
 
-
-@app.post("/api/import-papers")
-async def api_import_papers(request: Request):
-    """导入选中的论文（按 arxiv_id 列表）"""
-    if not _db_conn or not _settings:
-        raise HTTPException(status_code=500, detail="Not initialized")
-    body = await request.json()
-    ids = body.get("ids", [])
-    if not ids:
-        raise HTTPException(status_code=400, detail="No ids provided")
-    asyncio.create_task(_do_import_papers_safe(ids))
-    _log("info", f"Import triggered: {len(ids)} papers")
-    return JSONResponse(
-        content={
-            "status": "ok",
-            "message": f"Importing {len(ids)} papers",
-            "count": len(ids),
-        }
-    )
-
-
-async def _do_import_papers(arxiv_ids: list[str]):
-    """后台导入论文（按 arxiv_id 获取 -> 入库 -> LLM 摘要)"""
-    import datetime
-
-    from src.agents import PaperScorer
-    from src.db import exists, insert_paper, update_paper_summary
-    from src.network.factory import get_source
-
-    today = datetime.date.today().isoformat()
-    print(f"  [i] Importing {len(arxiv_ids)} papers by ID...")
-
-    try:
-        papers = await get_source(_settings).fetch_by_ids(arxiv_ids)
-    except Exception as e:
-        print(f"  [!] Failed to fetch papers: {e}")
-        return
-
+    db = PaperDB()
+    existing_ids = db.get_existing_arxiv_ids()
     new_papers = []
     for p in papers:
-        aid = p["arxiv_id"]
-        if not exists(_db_conn, aid):
-            p["fetch_date"] = today
-            insert_paper(_db_conn, p)
+        if p["arxiv_id"] not in existing_ids:
             new_papers.append(p)
-        else:
-            print(f"  [-] Paper already exists: {aid}")
 
-    # LLM 摘要
-    api_key = _settings.llm.api_key
     if new_papers:
+        # LLM 评分
+        _log("info", f"LLM 初筛 {len(new_papers)} 篇导入论文...")
+        from src.scorer import PaperScorer
+
         scorer = PaperScorer(
-            api_key=api_key,
+            api_key=_settings.llm.api_key,
             api_base=_settings.llm.api_base,
             model=_settings.llm.model,
             temperature=_settings.llm.temperature,
             max_tokens=_settings.llm.max_tokens,
         )
-        if api_key:
-            results = await scorer.score_batch_async(new_papers)
-            for paper, result in zip(new_papers, results, strict=False):
-                if result:
-                    update_paper_summary(
-                        _db_conn,
-                        paper["arxiv_id"],
-                        result.summary,
-                        result.remark,
-                        result.reason,
-                        result.score,
-                    )
-        else:
-            loop_import = asyncio.get_running_loop()
-            for paper in new_papers:
-                result = await loop_import.run_in_executor(
-                    None,
-                    scorer.score,
-                    paper.get("title", ""),
-                    paper.get("abstract", ""),
-                )
-                if result:
-                    update_paper_summary(
-                        _db_conn,
-                        paper["arxiv_id"],
-                        result.summary,
-                        result.remark,
-                        result.reason,
-                        result.score,
-                    )
+        results = await scorer.score_batch_async(new_papers)
+        for paper, result in zip(new_papers, results, strict=False):
+            if result:
+                paper["llm_summary"] = result.summary
+                paper["llm_remark"] = result.remark
+                paper["llm_reason"] = result.reason
+                paper["llm_score"] = result.score
+                paper["status"] = "summarized"
+            else:
+                paper["status"] = "new"
+        db.add_papers(new_papers)
+        _log("info", f"搜索导入: {len(new_papers)} 篇新论文")
 
-    await _refresh_snapshot()
-    await _refresh_notes_index()
-
-    # 通过 SSE 推送导入结果
-    result_data = {"fetched": len(papers), "new": len(new_papers)}
-    _notify_sse_clients(result_data)
-    print(f"  [OK] Import done: {len(papers)} papers, {len(new_papers)} new")
+    asyncio.create_task(_refresh_snapshot())
+    return JSONResponse(
+        content={"status": "ok", "searched": len(papers), "imported": len(new_papers)}
+    )
 
 
-async def _do_import_papers_safe(arxiv_ids: list[str]):
-    """带错误保护的 _do_import_papers 包装"""
-    try:
-        await _do_import_papers(arxiv_ids)
-    except Exception as e:
-        import traceback
+@app.post("/api/search-preview")
+async def api_search_preview(query: str = Form(...), max_results: int = Form(20)):
+    """搜索 Arxiv 预览结果（不导入，仅返回论文列表）"""
+    if not _settings:
+        raise HTTPException(status_code=500, detail="Not initialized")
+    from src.network.factory import get_source
 
-        traceback.print_exc()
-        _notify_sse_clients({"fetched": 0, "new": 0, "error": str(e)})
+    source = get_source(_settings)
+    papers = await source.search(query, max_results=min(max_results, 50))
+    if _db_zotero:
+        existing_zotero = await asyncio.to_thread(_db_zotero.get_existing_arxiv_ids)
+    else:
+        existing_zotero = set()
+    db = PaperDB()
+    existing_ids = db.get_existing_arxiv_ids()
+
+    for p in papers:
+        p["_in_zotero"] = p["arxiv_id"] in existing_zotero
+        p["_in_pending"] = p["arxiv_id"] in existing_ids
+
+    return JSONResponse(content={"papers": papers})
 
 
-async def _do_fetch(keyword: str, arxiv_cats: str, max_results: int, mode: str = "incremental"):
-    """后台执行抓取"""
+@app.post("/api/keyword-fetch")
+async def api_keyword_fetch(max_results: int = Form(20), mode: str = Form("incremental")):
+    """关键词抓取：使用 config.yaml 中配置的关键词抓取论文"""
+    if not _settings:
+        raise HTTPException(status_code=500, detail="Not initialized")
+    asyncio.create_task(_do_fetch_safe("", max_results, mode))
+    return JSONResponse(content={"status": "ok", "message": "Keyword fetch started"})
+
+
+@app.get("/api/keywords")
+async def api_get_keywords():
+    """获取当前配置文件中的关键词列表"""
+    from src.config import load_settings
+
+    cfg = load_settings()
+    return JSONResponse(
+        content={
+            "keywords": [
+                {
+                    "keyword": kw.keyword,
+                    "arxiv_cats": kw.arxiv_cats or [],
+                    "active": kw.active,
+                }
+                for kw in cfg.keywords
+            ],
+            "fetch_config": {
+                "max_results": cfg.fetch.max_results,
+                "lookback_days": cfg.fetch.lookback_days,
+            },
+        }
+    )
+
+
+@app.post("/api/keywords")
+async def api_save_keywords(data: dict):
+    """保存关键词和 fetch 配置到 config.yaml"""
+    import yaml
+
+    from src.config import CONFIG_DIR, load_settings
+
+    config_path = CONFIG_DIR / "config.yaml"
+
+    # 读取现有配置
+    existing = {}
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            existing = yaml.safe_load(f) or {}
+
+    # 更新 keywords（arxiv_cats 归一化为空数组避免 YAML null/[] 振荡）
+    keywords_raw = data.get("keywords", [])
+    existing["keywords"] = [
+        {
+            "keyword": kw["keyword"],
+            "arxiv_cats": kw.get("arxiv_cats") or [],
+            "active": kw.get("active", True),
+        }
+        for kw in keywords_raw
+    ]
+
+    # 更新 fetch 配置（max_results / lookback_days）
+    fetch_config = data.get("fetch_config")
+    if fetch_config:
+        if "fetch" not in existing or not isinstance(existing["fetch"], dict):
+            existing["fetch"] = {}
+        if "max_results" in fetch_config:
+            existing["fetch"]["max_results"] = int(fetch_config["max_results"])
+        if "lookback_days" in fetch_config:
+            existing["fetch"]["lookback_days"] = int(fetch_config["lookback_days"])
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(existing, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    # 刷新内存中的 _settings，使后续抓取立即生效
+    global _settings
+    _settings = load_settings()
+
+    _log("info", f"配置已保存: {len(keywords_raw)} 个关键词")
+    return JSONResponse(content={"status": "ok", "count": len(keywords_raw)})
+
+
+@app.post("/api/refresh")
+async def api_refresh():
+    asyncio.create_task(_refresh_snapshot())
+    return JSONResponse(content={"status": "ok", "message": "Refresh triggered"})
+
+
+@app.post("/api/push")
+async def api_push():
+    """发送邮件通知（仅统计摘要 + Top 3 + 审阅页面链接）。"""
+    if not _settings:
+        raise HTTPException(status_code=500, detail="Not initialized")
+
     from src.config import get_active_keywords
+    from src.notify import EmailNotifier
+
+    db = PaperDB()
+    stats = db.get_stats()
+    pending = db.get_pending()
+    if not pending:
+        return JSONResponse(content={"status": "ok", "sent": False, "reason": "no pending papers"})
+
+    server_cfg = _settings.server
+    server_url = f"http://{server_cfg.host}:{server_cfg.port}"
+
+    notifier = EmailNotifier(_settings.notification)
+    sent = await asyncio.to_thread(
+        notifier.send_fetch_report,
+        stats=stats,
+        new_papers=pending,
+        keywords=[kw.keyword for kw in get_active_keywords()],
+        server_url=server_url,
+    )
+    return JSONResponse(content={"status": "ok", "sent": sent})
+
+
+# ─── 后台任务 ─────────────────────────────────────────────
+
+
+async def _do_fetch(keyword: str, max_results: int, mode: str = "incremental"):
+    from src.config import KeywordEntry, get_active_keywords
     from src.network.fetch_pipeline import run_fetch_pipeline
 
     if keyword:
-        cats = [c.strip() for c in arxiv_cats.split(",") if c.strip()] if arxiv_cats else None
-        kws = [
-            {
-                "keyword": keyword,
-                "arxiv_cats": cats,
-                "active": True,
-            }
-        ]
+        kws = [KeywordEntry(keyword=keyword, arxiv_cats=None, active=True)]
     else:
         kws = get_active_keywords()
 
@@ -774,128 +529,73 @@ async def _do_fetch(keyword: str, arxiv_cats: str, max_results: int, mode: str =
         print("  [!] No keywords for background fetch")
         return
 
-    result = await run_fetch_pipeline(_db_conn, _settings, kws, max_results, mode=mode)
-
-    # 通过 SSE 推送抓取结果
-    result_data = {"fetched": result["fetched"], "new": result["new"]}
-    _notify_sse_clients(result_data)
-    print(f"  [OK] Background fetch done: {result['fetched']} fetched, {result['new']} new")
+    db = PaperDB()
+    result = await run_fetch_pipeline(_settings, kws, max_results, db=db, mode=mode)
+    _notify_sse_clients({"fetched": result.get("fetched", 0), "new": result.get("new", 0)})
 
 
-async def _do_fetch_safe(
-    keyword: str, arxiv_cats: str, max_results: int, mode: str = "incremental"
-):
-    """带错误保护的 _do_fetch 包装"""
+async def _do_fetch_safe(keyword: str, max_results: int, mode: str):
     try:
-        await _do_fetch(keyword, arxiv_cats, max_results, mode)
+        await _do_fetch(keyword, max_results, mode)
     except Exception as e:
         import traceback
 
         traceback.print_exc()
-        err_data = {"fetched": 0, "new": 0, "error": str(e)}
-        _notify_sse_clients(err_data)
-
-
-@app.post("/api/refresh")
-async def api_refresh():
-    """刷新 HTML 快照"""
-    asyncio.create_task(_refresh_snapshot())
-    asyncio.create_task(_refresh_notes_index())
-    _log("info", "HTML snapshots refreshed")
-    return JSONResponse(content={"status": "ok", "message": "Refresh triggered"})
-
-
-@app.post("/api/notify")
-async def api_notify():
-    """发送通知（Toast + 邮件），包含 server URL"""
-    if not _db_conn or not _settings:
-        raise HTTPException(status_code=500, detail="Not initialized")
-    from src.db import get_pending_keywords, get_stats
-    from src.notify import send_email_if_configured, send_windows_toast
-
-    stats = get_stats(_db_conn)
-    server_url = f"http://{_settings.server.host}:{_settings.server.port}"
-    important = stats.get("important", 0)
-    pending = stats.get("summarized_pending", 0)
-    keywords = get_pending_keywords(_db_conn)
-    send_windows_toast(
-        "Arxiv Paper Research",
-        f"Important: {important}, Pending: {pending}",
-        keywords=keywords,
-        url=server_url,
-    )
-    send_email_if_configured(_settings, stats, server_url, keywords=keywords)
-    _log("info", f"Notifications sent (Toast + email) to {server_url}")
-    return JSONResponse(
-        content={"status": "ok", "message": f"Notification sent. Server: {server_url}"}
-    )
-
-
-# ─── Background Tasks ─────────────────────────────────────
-
-
-async def _extract_and_note(arxiv_id: str, mark_type: str = "deep_read"):
-    """在后台线程池中运行笔记生成（避免阻塞 serve 事件循环）"""
-    from src.agents.note_agent import NoteAgent
-
-    loop = asyncio.get_running_loop()
-    try:
-        await loop.run_in_executor(
-            None,
-            lambda: asyncio.run(
-                NoteAgent.generate_from_arxiv_id(arxiv_id, OUTPUT_DIR, mode=mark_type)
-            ),
-        )
-        print(f"  [OK] Note generated: {arxiv_id} ({mark_type})")
-        await _refresh_notes_index()
-    except Exception as e:
-        print(f"  [!] Note generation failed [{arxiv_id}]: {e}")
+        _notify_sse_clients({"fetched": 0, "new": 0, "error": str(e)})
 
 
 async def _refresh_snapshot():
     try:
-        from src.db import get_papers_for_summary
         from src.serve.renderer import generate_summary_html
 
-        if _db_conn:
-            grouped = get_papers_for_summary(_db_conn)
-            generate_summary_html(grouped, OUTPUT_DIR)
+        db = PaperDB()
+        pending = db.get_pending()
+        marked = db.get_marked()
+        lurk = db.get_lurk()
+        grouped = {
+            "unmarked": pending,
+            "marked": marked,
+            "lurk": lurk,
+        }
+        generate_summary_html(grouped, OUTPUT_DIR)
     except Exception as e:
         print(f"  [!] Snapshot refresh failed: {e}")
 
 
-async def _refresh_notes_index():
-    try:
-        from src.serve.renderer import generate_notes_index_html
-
-        if _db_conn:
-            papers = [
-                dict(r)
-                for r in _db_conn.execute("SELECT * FROM papers ORDER BY fetch_date DESC LIMIT 500")
-            ]
-            generate_notes_index_html(papers, OUTPUT_DIR)
-    except Exception as e:
-        print(f"  [!] Notes index refresh failed: {e}")
+def _notify_sse_clients(data: dict):
+    for q in _sse_clients[:]:
+        with contextlib.suppress(Exception):
+            q.put_nowait(data)
 
 
-# ─── Server Entry Point ──────────────────────────────────
+# ─── 启动入口 ─────────────────────────────────────────────
 
 
-def run_server(settings, conn):
-    """启动服务"""
+def run_server(settings):
     import uvicorn
 
     init_logging()
-    set_db_conn(conn)
+
+    zotero = None
+    try:
+        zotero = ZoteroClient(
+            settings.zotero.api_key,
+            settings.zotero.library_id,
+            settings.zotero.library_type,
+        )
+        zotero.init_collections()
+        print("  [OK] Zotero connected")
+    except Exception as e:
+        print(f"  ⚠️ Zotero 连接失败: {e}")
+        print("  ⚠️ 标记/导入 Zotero 功能不可用，但审阅页面仍可正常访问")
+        zotero = None
+
+    if zotero:
+        set_zotero_client(zotero)
     set_settings(settings)
+
     server_cfg = settings.server
-    _log("info", "Server started")
     print(f"  [OK] Server: http://{server_cfg.host}:{server_cfg.port}")
-    print(f"  [OK] Summary: http://{server_cfg.host}:{server_cfg.port}/")
-    print(f"  [OK] Notes:   http://{server_cfg.host}:{server_cfg.port}/notes")
     uvicorn.run(
-        "src.serve.server:app",
-        host=server_cfg.host,
-        port=server_cfg.port,
-        log_level="info",
+        "src.serve.server:app", host=server_cfg.host, port=server_cfg.port, log_level="info"
     )

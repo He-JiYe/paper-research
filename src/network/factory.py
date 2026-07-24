@@ -1,4 +1,4 @@
-"""数据源工厂：按 settings.source 路由到对应模块，解耦抓取管道与具体数据源。
+"""数据源工厂：按 settings.fetch.source 路由到对应模块，解耦抓取管道与具体数据源。
 
 当前支持的数据源:
   - "arxiv" (默认): 从 arxiv.org 抓取
@@ -6,7 +6,7 @@
 扩展方式:
     1. 继承 ``base.BaseSource`` 实现子类（例如 ``PubmedSource``）
     2. 通过 ``register_source()`` 注册到工厂
-    3. 在 settings.json 中设置 ``"source": "pubmed"``
+    3. 在 config.yaml 中设置 ``fetch.source: "pubmed"``
 """
 
 from __future__ import annotations
@@ -14,8 +14,6 @@ from __future__ import annotations
 from typing import Any
 
 from src.network.base import BaseSource
-
-
 
 # ─── Arxiv 数据源适配器 ─────────────────────────────────────
 
@@ -38,12 +36,6 @@ class ArxivSource(BaseSource):
 
         return await _search(query, max_results, categories)
 
-    async def download_pdf(self, paper_id, output_dir):
-        from src.network.arxiv import download_pdf as _download
-
-        return await _download(paper_id, output_dir)
-
-
 # ─── 注册表 ─────────────────────────────────────────────────
 
 
@@ -61,7 +53,7 @@ def get_source(settings: Any) -> BaseSource:
     """根据配置获取数据源实例。
 
     Args:
-        settings: 配置对象（需含 ``source`` 字段，通常为 ``AppConfig``）
+        settings: AppConfig 对象（使用 settings.fetch.source）
 
     Returns:
         实现了 ``BaseSource`` 抽象基类的数据源实例
@@ -69,7 +61,7 @@ def get_source(settings: Any) -> BaseSource:
     Raises:
         ValueError: 未知的数据源名称
     """
-    source_name = getattr(settings, "source", "arxiv")
+    source_name = settings.fetch.source
     cls = _SOURCES.get(source_name)
     if cls is None:
         raise ValueError(

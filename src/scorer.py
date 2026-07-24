@@ -1,10 +1,12 @@
-"""PaperScorer Agent：论文初筛 — 对标题+摘要进行 LLM 评级和评分"""
+"""PaperScorer：论文初筛 — 对标题+摘要进行 LLM 评级和评分"""
 
 import asyncio
+import json
+import os
 import re
 from dataclasses import dataclass
 
-from src.agents.base import BaseAgent
+from openai import AsyncOpenAI, OpenAI
 
 
 @dataclass
@@ -15,6 +17,7 @@ class LLMResult:
     remark: str  # important / useful / browse / skip
     reason: str
     score: float
+    score_distribution: dict[str, float] | None = None  # 概率分布 {0: p0, 1: p1, ..., 5: p5}
 
 
 SUMMARIZE_PROMPT = """你是一位计算机科学博士生,正在筛选 Arxiv 预印本论文.请根据以下论文的标题和摘要,给出你的判断.
@@ -30,7 +33,7 @@ SUMMARIZE_PROMPT = """你是一位计算机科学博士生,正在筛选 Arxiv �
   "summary": "用2-3句中文概括本文的核心技术贡献和方法",
   "remark": "从以下4个等级中选择一个",
   "reason": "用1句话说明选择该等级的理由",
-  "score": 0.0到1.0之间的相关性评分
+  "score_distribution": {{"0": 概率0, "1": 概率1, "2": 概率2, "3": 概率3, "4": 概率4, "5": 概率5}}
 }}
 ```
 
@@ -40,11 +43,15 @@ SUMMARIZE_PROMPT = """你是一位计算机科学博士生,正在筛选 Arxiv �
 - "browse": 有一定参考价值但非核心关注方向,可快速浏览
 - "skip": 增量式工作,无明显贡献,或与研究方向无关
 
-评分标准（请结合「搜索关键词」判断相关性）:
-- 0.8-1.0: 高度相关,标题/摘要直接命中搜索关键词,是该方向核心工作
-- 0.6-0.8: 有一定相关性,涉及关键词方向但不完全聚焦
-- 0.4-0.6: 弱相关,背景参考价值
-- 0.0-0.4: 基本不相关,与搜索关键词方向偏离较远
+评分标准（请结合「搜索关键词」判断相关性,输出各分数的概率分布）:
+- 5分: 高度相关,标题/摘要直接命中搜索关键词,是该方向核心工作
+- 4分: 有一定相关性,涉及关键词方向但不完全聚焦
+- 3分: 弱相关,有一定背景参考价值
+- 2分: 非常弱的相关性,仅边缘触及
+- 1分: 基本不相关,与搜索关键词方向偏离较远
+- 0分: 完全不相关,与研究方向无关
+
+请为每个分数给出合理的概率(0.0-1.0),所有概率之和应为1.0。score_distribution 的 key 必须为字符串形式的 "0"、"1"、"2"、"3"、"4"、"5"。最终得分由系统根据概率分布的期望值自动计算,请同时填写 score 字段。
 """
 
 
@@ -84,12 +91,134 @@ def compute_keyword_relevance(title: str, abstract: str, keyword: str) -> float:
     return round(min(0.95, score), 2)
 
 
-class PaperScorer(BaseAgent):
-    """论文初筛 Agent。
+class PaperScorer:
+    """论文初筛评分器。
 
     对论文标题+摘要进行 LLM 评级（important/useful/browse/skip）
     和相关性评分（0-1），并生成中文摘要。
+
+    不再继承 BaseAgent，所有功能内联实现。
     """
+
+    def __init__(
+        self,
+        api_key: str = "",
+        api_base: str = "https://api.deepseek.com",
+        model: str = "deepseek-chat",
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+    ):
+        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+        self.api_base = api_base
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def _call(self, system_prompt: str, user_prompt: str) -> str | None:
+        """同步调用 LLM API。"""
+        if not self.api_key:
+            return None
+        try:
+            client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+            resp = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            print(f"  [!] LLM API call failed: {e}")
+            return None
+
+    async def _call_async(self, system_prompt: str, user_prompt: str) -> str | None:
+        """异步调用 LLM API。"""
+        if not self.api_key:
+            return None
+        try:
+            client = AsyncOpenAI(api_key=self.api_key, base_url=self.api_base)
+            resp = await client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            print(f"  [!] LLM API call failed: {e}")
+            return None
+
+    @staticmethod
+    def _compute_score_from_distribution(
+        dist: dict, fallback_score: float = 0.5
+    ) -> tuple[float, dict[str, float] | None]:
+        """从概率分布计算期望得分（归一化到 0~1）。
+
+        期望 = Σ(p_i * i) / 5, 其中 i ∈ {0,1,2,3,4,5}
+
+        Returns:
+            (score_0_1, normalized_distribution) 或 (fallback_score, None)
+        """
+        try:
+            if not isinstance(dist, dict) or len(dist) == 0:
+                return fallback_score, None
+
+            probs: dict[str, float] = {}
+            total_prob = 0.0
+            expected = 0.0
+
+            for k, v in dist.items():
+                key = str(k)
+                prob = float(v)
+                if prob < 0:
+                    return fallback_score, None
+                probs[key] = prob
+                total_prob += prob
+                score_val = float(key)
+                expected += score_val * prob
+
+            # 概率和应接近 1.0，允许小误差
+            if total_prob < 0.9 or total_prob > 1.1:
+                # 归一化
+                if total_prob > 0:
+                    expected /= total_prob
+                    probs = {k: v / total_prob for k, v in probs.items()}
+
+            score_0_1 = max(0.0, min(1.0, expected / 5.0))
+            return score_0_1, probs
+        except (ValueError, TypeError, KeyError):
+            return fallback_score, None
+
+    @staticmethod
+    def _extract_json(content: str) -> dict | None:
+        """从 LLM 响应中提取 JSON 对象。
+
+        支持纯 JSON 和 ```json ... ``` 包裹两种格式。
+        """
+        if not content:
+            return None
+        # 尝试从 markdown 代码块中提取
+        match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", content, re.DOTALL)
+        if match:
+            content = match.group(1).strip()
+        # 尝试直接解析
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+        # 尝试从内容中查找第一个 { 到最后一个 }
+        try:
+            start = content.index("{")
+            end = content.rindex("}")
+            return json.loads(content[start : end + 1])
+        except (ValueError, json.JSONDecodeError):
+            return None
 
     def score(
         self,
@@ -125,11 +254,16 @@ class PaperScorer(BaseAgent):
         if content:
             result = self._extract_json(content)
             if result:
+                score, dist = self._compute_score_from_distribution(
+                    result.get("score_distribution", {}),
+                    fallback_score=max(0.0, min(1.0, float(result.get("score", 0.5)))),
+                )
                 return LLMResult(
                     summary=result.get("summary", abstract[:200] + "..."),
                     remark=result.get("remark", "browse"),
                     reason=result.get("reason", ""),
-                    score=max(0.0, min(1.0, float(result.get("score", 0.5)))),
+                    score=score,
+                    score_distribution=dist,
                 )
         return self._fallback(title, abstract, keyword)
 
@@ -167,11 +301,16 @@ class PaperScorer(BaseAgent):
         if content:
             result = self._extract_json(content)
             if result:
+                score, dist = self._compute_score_from_distribution(
+                    result.get("score_distribution", {}),
+                    fallback_score=max(0.0, min(1.0, float(result.get("score", 0.5)))),
+                )
                 return LLMResult(
                     summary=result.get("summary", abstract[:200] + "..."),
                     remark=result.get("remark", "browse"),
                     reason=result.get("reason", ""),
-                    score=max(0.0, min(1.0, float(result.get("score", 0.5)))),
+                    score=score,
+                    score_distribution=dist,
                 )
         return self._fallback(title, abstract, keyword)
 
