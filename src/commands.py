@@ -12,7 +12,7 @@ import webbrowser
 
 
 def cmd_fetch(args, settings):
-    """抓取 Arxiv 论文 → LLM 评分 → 写入数据库 → 生成 HTML"""
+    """抓取 Arxiv 论文 → LLM 评分 → 写入数据库 → 记录抓取日志"""
     from src.config import get_active_keywords
     from src.db import PaperDB
     from src.network.fetch_pipeline import run_fetch_pipeline

@@ -24,23 +24,19 @@ env/
 .uv/
 
 # ── Project runtime data ─────────────────────────────
-data/
+data/*
+# 静态数据 JSON（app-meta.json）纳入 git 版本管理；动态数据（papers.db 等）保持忽略
+!data/static/
+!data/static/app-meta.json
 output/
 *.db
 *.db-shm
 *.db-wal
-fetch_status.json
 
 # ── Sensitive configuration ─────────────────────────
 config/settings.json
 config/config.yaml
 config/*.local.yaml
-
-# ── Orphan files from old structure (moved to subdirectories) ─
-/src/renderer.py
-/src/server.py
-/src/network.py
-/src/setup_task.ps1
 
 # ── IDE & Editor ────────────────────────────────────
 .vscode/

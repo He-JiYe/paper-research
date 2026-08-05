@@ -4,16 +4,16 @@
 1. 从 Arxiv 抓取论文（不下载 PDF）
 2. LLM 初筛评分
 3. 存入 SQLite 数据库
-4. 生成 HTML
+4. 记录抓取日志
 
 注意：本管道不发送邮件。邮件只由调度器（每日定时抓取后）或
 用户手动触发（CLI notify / 页面推送按钮）发送。
+页面渲染已改为前端 SPA 动态渲染（/api/papers），不再生成 HTML。
 """
 
 import asyncio
 import logging
 
-from src.config import OUTPUT_DIR
 from src.scorer import PaperScorer
 
 logger = logging.getLogger(__name__)
@@ -155,19 +155,7 @@ async def run_fetch_pipeline(
     new_count = db.add_papers(to_score)
     print(f"  [OK] 已写入数据库: {new_count}/{len(to_score)} 篇")
 
-    # ── 6. 生成 HTML ──────────────────────────────────────
-    print("  [i] 生成 HTML...")
-    from src.serve.renderer import generate_summary_html
-
-    pending = db.get_pending()
-    marked = db.get_marked()
-    lurk = db.get_lurk()
-    generate_summary_html(
-        {"unmarked": pending, "marked": marked, "lurk": lurk},
-        OUTPUT_DIR,
-    )
-
-    # ── 7. 记录抓取日志 ──────────────────────────────────
+    # ── 6. 记录抓取日志 ──────────────────────────────────
     db.add_fetch_log(
         keywords_used=len(keywords),
         papers_fetched=len(all_papers),

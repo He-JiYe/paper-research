@@ -43,8 +43,6 @@ uv venv .venv
 uv sync
 ```
 
-> 💡 也可以不手动激活虚拟环境，直接使用 `uv run` 命令，它会自动识别虚拟环境。
-
 ### 2. 配置
 
 复制示例配置并填写：
@@ -79,7 +77,7 @@ setx EMAIL_PASSWORD "smtp-auth-code"   # QQ 邮箱 SMTP 授权码（非 QQ 密�
 ### 3. 首次抓取
 
 ```bash
-uv run paper-research fetch              # 增量抓取（lookback_days 窗口）+ LLM 评分 + 生成 HTML
+uv run paper-research fetch              # 增量抓取（lookback_days 窗口）+ LLM 评分 + 写入 DB
 uv run paper-research fetch -m historical # 历史抓取（不限时间，按相关性排序）
 uv run paper-research fetch --dry-run    # 预览模式，不写入数据库
 ```
@@ -110,7 +108,7 @@ uv run paper-research serve
 ## 命令参考
 
 ```bash
-uv run paper-research fetch              # 增量抓取 + LLM 评分 + 写入 DB + 生成 HTML
+uv run paper-research fetch              # 增量抓取 + LLM 评分 + 写入 DB
 uv run paper-research fetch -k <keyword> # 仅抓取指定关键词
 uv run paper-research fetch -n 30        # 覆盖每关键词最大结果数
 uv run paper-research fetch --dry-run    # 预览模式
@@ -119,11 +117,13 @@ uv run paper-research status             # 统计仪表盘（DB + Zotero + 抓�
 uv run paper-research notify             # 手动发送通知邮件
 ```
 
-Web API（serve 运行时）：
+Web API（serve 运行时，前后端分离）：
 
 | 端点 | 说明 |
 |------|------|
-| `GET /` | 审阅首页 |
+| `GET /` | 前端 SPA（静态托管 index.html） |
+| `GET /api/papers` | 分组论文 JSON（unmarked/marked/lurk + stats） |
+| `GET /api/static` | 静态元数据 JSON（arxiv 分类、评级标签/颜色、分区标题） |
 | `POST /mark` | 标记论文（ignore/lurk/pending） |
 | `POST /api/zotero/import` | 导入论文到 Zotero |
 | `GET /api/zotero/collections` | Zotero 收藏夹列表 |
@@ -161,10 +161,10 @@ paper-research/
 ├── config/
 │   ├── config.yaml          # 实际配置（含密钥，已 gitignore）
 │   └── config.example.yaml  # 配置模板（可提交）
-├── data/                    # SQLite 运行时数据库（papers.db）
-├── output/                  # 生成产物（HTML 摘要页、日志）
-├── static/                  # 前端静态资源
-├── templates/               # Jinja2 模板（summary.html）
+├── data/
+│   ├── static/app-meta.json # 静态元数据 JSON（arxiv 分类、评级标签/颜色，git 版本化，可编辑）
+│   └── papers.db            # SQLite 运行时数据库（动态数据，gitignore）
+├── output/                  # 运行日志、诊断快照
 ├── scripts/                 # 部署脚本（register_task.ps1）
 ├── src/
 │   ├── main.py              # CLI 入口（argparse）
@@ -177,10 +177,12 @@ paper-research/
 │   │   ├── base.py          # 数据源抽象基类
 │   │   ├── arxiv.py         # Arxiv API（基于 arxiv 库）
 │   │   ├── factory.py       # 数据源工厂（可扩展 pubmed 等）
-│   │   └── fetch_pipeline.py# 抓取管道（抓取→评分→入库→HTML→日志）
+│   │   └── fetch_pipeline.py# 抓取管道（抓取→评分→入库→日志）
 │   ├── serve/
-│   │   ├── server.py        # FastAPI Web 服务
-│   │   ├── renderer.py      # Jinja2 渲染（autoescape 防 XSS）
+│   │   ├── server.py        # FastAPI Web 服务（JSON API + 前端静态托管）
+│   │   ├── static_data.py   # 静态元数据默认值 + 短标题建议 + app-meta 读写
+│   │   ├── payloads.py      # /api/papers 载荷构建（纯函数）
+│   │   ├── frontend/        # 前端 SPA（index.html + app.js + style.css）
 │   │   └── scheduler.py     # 内置定时调度器（时区感知 + 启动补抓）
 │   └── zotero/
 │       ├── client.py        # Zotero API 客户端（pyzotero 封装）
@@ -205,8 +207,10 @@ uv run pytest --cov=src        # 带覆盖率
 | 组件 | 技术 |
 |------|------|
 | 语言 | Python 3.11+（uv 管理） |
-| Web 框架 | FastAPI + Jinja2 |
+| 后端 | FastAPI（JSON API + 静态托管） |
+| 前端 | 原生 JS SPA（无构建工具链，动态渲染） |
 | 数据库 | SQLite（WAL 模式） |
+| 静态数据 | JSON 文件（data/static/app-meta.json） |
 | Arxiv | arxiv 官方库 |
 | LLM | Deepseek API（OpenAI SDK） |
 | Zotero | pyzotero |
@@ -217,7 +221,7 @@ uv run pytest --cov=src        # 带覆盖率
 ## 安全说明
 
 - **密钥管理**：`config/config.yaml` 已 gitignore；推荐 `${ENV_VAR}` 占位符从环境变量读取
-- **XSS 防护**：Jinja2 已开启 autoescape，论文标题/摘要/LLM 输出自动转义
+- **XSS 防护**：前端 `app.js` 对标题/作者/摘要/LLM 输出等不可信内容统一 `escapeHtml()`/`textContent` 转义
 - **输入校验**：`/api/pdf/{arxiv_id}` 校验 ID 格式
 - **绑定地址**：server 默认仅监听 `127.0.0.1`，不要改为 `0.0.0.0`
 - **Arxiv 限流**：`max_concurrent_requests` 建议 ≤ 3（官方建议 1 请求/3 秒）

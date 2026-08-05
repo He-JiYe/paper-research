@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paper Research — 论文审阅</title>
+    <script>
+        /* 主题初始化（防闪烁）：localStorage 优先，其次跟随系统 */
+        (function () {
+            try {
+                var t = localStorage.getItem('pr-theme');
+                if (!t) {
+                    t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+                }
+                document.documentElement.setAttribute('data-theme', t);
+            } catch (e) {}
+        })();
+    </script>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-main">
+                <h1>📄 论文审阅</h1>
+                <div class="update-time">
+                    <span id="update-time-text">更新于 --</span>
+                    <span class="dot-sep">·</span>
+                    <span id="total-count-text">共 -- 篇</span>
+                    <span class="dot-sep">·</span>
+                    <span>待审核 <strong id="unmarked-count">--</strong></span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button onclick="showFetchModal()" class="action-btn">🔄 抓取</button>
+                <button onclick="doPush()" class="action-btn">📧 推送</button>
+                <button onclick="doRefresh()" class="action-btn">🔃 刷新</button>
+                <button onclick="toggleTheme()" class="action-btn theme-toggle" id="theme-toggle" title="切换亮色/深色">
+                    <span class="theme-icon" id="theme-icon">🌙</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item important">
+                <div class="stat-num" id="stat-important">0</div>
+                <div class="stat-label">⭐ 重要</div>
+            </div>
+            <div class="stat-item useful">
+                <div class="stat-num" id="stat-useful">0</div>
+                <div class="stat-label">👍 值得关注</div>
+            </div>
+            <div class="stat-item browse">
+                <div class="stat-num" id="stat-browse">0</div>
+                <div class="stat-label">📄 可浏览</div>
+            </div>
+            <div class="stat-item unmarked">
+                <div class="stat-num" id="stat-unmarked">0</div>
+                <div class="stat-label">⏳ 待审核</div>
+            </div>
+        </div>
+
+        <div class="filters">
+            <div class="filters-row">
+                <button class="filter-btn active" onclick="filterByRemark('all', this)">全部</button>
+                <button class="filter-btn" onclick="filterByRemark('important', this)">⭐ 重要</button>
+                <button class="filter-btn" onclick="filterByRemark('useful', this)">👍 值得关注</button>
+                <button class="filter-btn" onclick="filterByRemark('browse', this)">📄 可浏览</button>
+            </div>
+            <div class="filters-row filters-tools">
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="paper-search" class="search-input"
+                           placeholder="搜索标题 / 作者 / 关键词 / 摘要..."
+                           oninput="onSearchInput(this.value)">
+                    <button class="search-clear" id="search-clear" onclick="clearSearch()" title="清除">×</button>
+                </div>
+                <select id="sort-select" class="sort-select" onchange="applySort(this.value)" title="排序方式">
+                    <option value="default">默认排序</option>
+                    <option value="score">⭐ 评分高 → 低</option>
+                    <option value="published">📅 发布时间新 → 旧</option>
+                    <option value="fetch">📥 导入时间新 → 旧</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- 抓取弹窗 -->
+        <div id="fetch-modal" class="modal-overlay" style="display:none;">
+            <div class="modal-card">
+                <h3 class="modal-title">🔄 Arxiv 论文操作</h3>
+                <!-- Tabs -->
+                <div class="modal-tabs">
+                    <button id="ftab-keyword" class="ftab active" onclick="switchFetchTab('keyword')">关键词抓取</button>
+                    <button id="ftab-search" class="ftab" onclick="switchFetchTab('search')">搜索论文</button>
+                    <button id="ftab-keywords" class="ftab" onclick="switchFetchTab('keywords')">关键词设置</button>
+                </div>
+                <!-- Tab: Keyword Fetch -->
+                <div id="fpanel-keyword">
+                    <label class="form-label">关键词（留空则使用配置）</label>
+                    <input id="fetch-keyword" class="form-input" placeholder="如: test-time adaptation">
+                    <label class="form-label">Arxiv 分类（可选）</label>
+                    <div id="cat-checkboxes" class="cat-pills"></div>
+                    <label class="form-label">结果数量</label>
+                    <input id="fetch-max" type="number" min="5" max="100" class="form-input">
+                    <label class="form-label">抓取模式</label>
+                    <div class="radio-row">
+                        <label>
+                            <input type="radio" name="fetch-mode" value="incremental" checked onchange="toggleFetchModeHint()">
+                            增量模式 — 最近 <span id="fetch-lb-days">--</span> 天内的最新论文
+                        </label>
+                        <label>
+                            <input type="radio" name="fetch-mode" value="historical" onchange="toggleFetchModeHint()">
+                            历史模式 — 全量按相关性排序
+                        </label>
+                    </div>
+                    <div class="modal-actions">
+                        <button onclick="doFetch()" class="btn btn-primary btn-flex">开始抓取</button>
+                        <button onclick="closeFetchModal()" class="btn btn-ghost">关闭</button>
+                    </div>
+                    <div id="fetch-result" class="modal-status"></div>
+                </div>
+                <!-- Tab: Search -->
+                <div id="fpanel-search" style="display:none;">
+                    <label class="form-label">搜索词（支持 ti: / au: / all: 前缀）</label>
+                    <div class="kw-input-row">
+                        <input id="search-query" class="form-input" placeholder='如: ti:transformer 或 all:out-of-distribution'>
+                        <button onclick="doSearch()" class="btn btn-primary">搜索</button>
+                    </div>
+                    <div id="search-results">
+                        <div class="search-empty">输入搜索词后点击搜索</div>
+                    </div>
+                    <div class="modal-actions">
+                        <button id="import-btn" onclick="doImport()" class="btn btn-success btn-flex" disabled>导入选中 (0 篇)</button>
+                        <button onclick="closeFetchModal()" class="btn btn-ghost">关闭</button>
+                    </div>
+                    <div id="import-status" class="modal-status"></div>
+                </div>
+                <!-- Tab: Keyword Settings -->
+                <div id="fpanel-keywords" style="display:none;">
+                    <label class="form-label">关键词管理</label>
+                    <div id="kw-list" class="kw-list">
+                        <div class="search-empty">切换到该标签加载...</div>
+                    </div>
+                    <!-- 增量抓取设置 -->
+                    <div class="kw-settings-box">
+                        <div class="kw-input-row">
+                            <div style="flex:1;">
+                                <label class="form-label">每关键词目标新增数</label>
+                                <input id="kw-target-new" type="number" min="5" max="200" class="form-input">
+                            </div>
+                            <div style="flex:1;">
+                                <label class="form-label">历史回溯天数</label>
+                                <input id="kw-lookback-days" type="number" min="7" max="730" class="form-input">
+                            </div>
+                        </div>
+                        <label class="form-label">抓取模式</label>
+                        <div class="radio-row">
+                            <label>
+                                <input type="radio" name="config-fetch-mode" value="incremental" checked>
+                                增量模式 — 最近 <span id="cfg-lb-days">--</span> 天内
+                            </label>
+                            <label>
+                                <input type="radio" name="config-fetch-mode" value="historical">
+                                历史模式 — 全量按相关性排序
+                            </label>
+                        </div>
+                    </div>
+                    <div class="kw-input-row">
+                        <input id="kw-new-keyword" class="form-input" style="flex:2;" placeholder="新关键词">
+                        <input id="kw-new-cat" class="form-input" style="flex:1;" placeholder="arxiv分类 如 cs.CV,cs.LG">
+                        <button onclick="addKeywordItem()" class="btn btn-primary">添加</button>
+                    </div>
+                    <div class="modal-actions">
+                        <button onclick="saveAllSettings()" class="btn btn-success btn-flex">保存设置</button>
+                        <button onclick="reloadConfig()" class="btn btn-warning">🔄 重载配置</button>
+                        <button onclick="fetchByConfig()" class="btn btn-primary btn-flex">按设置抓取</button>
+                        <button onclick="closeFetchModal()" class="btn btn-ghost">关闭</button>
+                    </div>
+                    <div id="kw-result" class="modal-status"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="paper-list">
+            <div class="empty-state"><p>📭 加载中...</p></div>
+        </div>
+    </div>
+
+    <!-- Zotero 导入面板 -->
+    <div id="zotero-import-panel" class="modal-overlay" style="display:none;">
+        <div class="modal-card modal-narrow">
+            <h3 class="modal-title">📚 导入 Zotero</h3>
+            <label class="form-label">目标分类</label>
+            <select id="zi-collection" class="form-select">
+                <option value="">加载中...</option>
+            </select>
+            <label class="form-label">短标题</label>
+            <input id="zi-title" class="form-input" placeholder="短标题">
+            <div class="modal-actions">
+                <button onclick="confirmZoteroImport()" class="btn btn-primary btn-flex">确认导入</button>
+                <button onclick="closeZoteroImport()" class="btn btn-ghost">关闭</button>
+            </div>
+            <div id="zi-status" class="modal-status"></div>
+        </div>
+    </div>
+
+    <script src="/app.js" defer></script>
+</body>
+</html>

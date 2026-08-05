@@ -13,17 +13,19 @@ import contextlib
 import json
 import logging
 import re
+from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.config import OUTPUT_DIR, ROOT_DIR
+from src.config import OUTPUT_DIR
 from src.db import PaperDB
 from src.zotero import ZoteroClient
 from src.zotero.models import COLLECTION_ROOT, generate_short_title
 
-STATIC_DIR = ROOT_DIR / "static"
+# 前端 SPA 静态目录（前后端分离：静态资产由 StaticFiles 托管，数据经 /api/* JSON 获取）
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 
 _db_zotero: ZoteroClient | None = None
 _settings = None
@@ -36,6 +38,10 @@ _sse_clients: list["asyncio.Queue[dict]"] = []
 @contextlib.asynccontextmanager
 async def _app_lifespan(_app: FastAPI):
     global _scheduler
+    # 确保静态元数据 JSON（data/static/app-meta.json）存在
+    from src.serve.static_data import ensure_static_data
+
+    ensure_static_data()
     if _settings:
         try:
             from src.serve.scheduler import FetchScheduler
@@ -50,10 +56,7 @@ async def _app_lifespan(_app: FastAPI):
         _scheduler.stop()
 
 
-app = FastAPI(title="Paper Research", version="0.5.0", lifespan=_app_lifespan)
-
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app = FastAPI(title="Paper Research", version="0.6.0", lifespan=_app_lifespan)
 
 
 def init_logging():
@@ -91,26 +94,30 @@ def _log(level: str, msg: str):
     print(f"  [{level.upper()}] {msg}")
 
 
-# ─── 首页：论文审阅概览 ────────────────────────────────────
+# ─── 数据 API：前后端分离的核心 ─────────────────────────────
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    from src.serve.renderer import generate_summary_html
+@app.get("/api/papers")
+async def api_papers():
+    """返回分组论文 JSON：unmarked/marked/lurk + stats + update_time + fetch_config。
+
+    动态数据（读 SQLite），前端据此动态渲染，替代原服务端 Jinja2 渲染。
+    """
+    from src.serve.payloads import build_papers_payload
 
     db = PaperDB()
-    pending = db.get_pending()
-    marked = db.get_marked()
-    lurk = db.get_lurk()
+    return JSONResponse(content=build_papers_payload(db))
 
-    grouped = {
-        "unmarked": pending,
-        "marked": marked,
-        "lurk": lurk,
-    }
-    path = generate_summary_html(grouped)
-    html_ = path.read_text(encoding="utf-8")
-    return HTMLResponse(content=html_)
+
+@app.get("/api/static")
+async def api_static():
+    """返回前端静态元数据（arxiv 分类、评级标签/颜色、分区标题）。
+
+    静态数据来自 data/static/app-meta.json（可编辑覆盖层），缺键时回退默认值。
+    """
+    from src.serve.static_data import load_app_meta
+
+    return JSONResponse(content=load_app_meta())
 
 
 # ─── PDF 代理 ─────────────────────────────────────────────
@@ -157,7 +164,6 @@ async def mark_paper(
 
     db = PaperDB()
     db.update_mark(arxiv_id, mark_type, short_title=short_title)
-    asyncio.create_task(_refresh_snapshot())
     return JSONResponse(content={"status": "ok", "arxiv_id": arxiv_id, "mark_type": mark_type})
 
 
@@ -279,7 +285,6 @@ async def api_zotero_import(
     # 导入成功：标记为已处理（从待审阅池移除，记入已处理组）
     db.update_mark(arxiv_id, "imported", short_title=final_title, zotero_key=item_key)
     _log("info", f"Zotero import complete: {arxiv_id} -> {item_key} (pdf={False})")
-    asyncio.create_task(_refresh_snapshot())
     return JSONResponse(
         content={
             "status": "ok",
@@ -368,7 +373,6 @@ async def api_search_import(data: dict):
         db.add_papers(new_papers)
         _log("info", f"搜索导入: {len(new_papers)} 篇新论文")
 
-    asyncio.create_task(_refresh_snapshot())
     return JSONResponse(
         content={"status": "ok", "searched": len(papers), "imported": len(new_papers)}
     )
@@ -478,12 +482,6 @@ async def api_save_keywords(data: dict):
     return JSONResponse(content={"status": "ok", "count": len(keywords_raw)})
 
 
-@app.post("/api/refresh")
-async def api_refresh():
-    asyncio.create_task(_refresh_snapshot())
-    return JSONResponse(content={"status": "ok", "message": "Refresh triggered"})
-
-
 @app.post("/api/push")
 async def api_push():
     """发送邮件通知（仅统计摘要 + Top 3 + 审阅页面链接）。"""
@@ -544,28 +542,16 @@ async def _do_fetch_safe(keyword: str, max_results: int, mode: str):
         _notify_sse_clients({"fetched": 0, "new": 0, "error": str(e)})
 
 
-async def _refresh_snapshot():
-    try:
-        from src.serve.renderer import generate_summary_html
-
-        db = PaperDB()
-        pending = db.get_pending()
-        marked = db.get_marked()
-        lurk = db.get_lurk()
-        grouped = {
-            "unmarked": pending,
-            "marked": marked,
-            "lurk": lurk,
-        }
-        generate_summary_html(grouped, OUTPUT_DIR)
-    except Exception as e:
-        print(f"  [!] Snapshot refresh failed: {e}")
-
-
 def _notify_sse_clients(data: dict):
     for q in _sse_clients[:]:
         with contextlib.suppress(Exception):
             q.put_nowait(data)
+
+
+# ─── 前端静态资源（前后端分离）────────────────────────────
+# 须放在所有 /api/* 路由之后注册，避免 catch-all 遮蔽 JSON API
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
 
 # ─── 启动入口 ─────────────────────────────────────────────

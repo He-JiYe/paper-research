@@ -21,9 +21,9 @@
 ```
 .venv/                   # 虚拟环境 (uv 管理)
 config/                  # 配置文件（config.yaml）
-data/                    # SQLite 运行时数据库（papers.db）+ 抓取日志
-static/                  # 前端静态资源
-templates/               # Jinja2 HTML 模板
+data/
+├── static/              # 静态数据 JSON（app-meta.json，git 版本化）
+└── papers.db            # SQLite 运行时数据库（动态数据）
 src/
 ├── __init__.py          # 包标识 + 版本号
 ├── main.py              # CLI 入口（argparse 解析 + 命令分发）
@@ -41,8 +41,10 @@ src/
 │
 ├── serve/
 │   ├── __init__.py      # Serve 包初始化
-│   ├── server.py        # FastAPI Web 服务（路由 + 标记 + 搜索导入）
-│   ├── renderer.py      # Jinja2 HTML 渲染器
+│   ├── server.py        # FastAPI Web 服务（JSON API + 前端静态托管）
+│   ├── static_data.py   # 静态元数据默认值 + 短标题建议 + app-meta 读写
+│   ├── payloads.py      # /api/papers 载荷构建（纯函数）
+│   ├── frontend/        # 前端 SPA（index.html + app.js + style.css）
 │   └── scheduler.py     # 定时抓取调度器
 │
 ├── zotero/
@@ -74,8 +76,8 @@ uv run pytest                            # 运行测试
 ## 数据流
 
 ```
-Arxiv API ──→ network/fetch_pipeline.py ──→ db.py (SQLite) ──→ serve/renderer.py
-  (Atom XML)   (并发 fetch + LLM 评分 + 写入)  (PaperDB)      (HTML 审阅页面)
+Arxiv API ──→ network/fetch_pipeline.py ──→ db.py (SQLite) ──→ /api/papers ──→ 前端 SPA
+  (Atom XML)   (并发 fetch + LLM 评分 + 写入)  (PaperDB)      (JSON API)     (frontend/app.js 动态渲染)
                                                     │
                                                     └──→ serve/server.py ──→ Zotero
                                                          (Web 交互/标记)      (导入指定收藏夹)
