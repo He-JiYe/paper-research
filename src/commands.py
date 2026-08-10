@@ -1,27 +1,32 @@
 """命令处理模块：各 CLI 子命令的实现（基于 DB + Zotero）"""
 
 import asyncio
-import datetime
+import logging
 import socket
 import sys
 import threading
 import time
 import webbrowser
 
+logger = logging.getLogger(__name__)
+
+_DASH_WIDTH = 62  # status 仪表盘总宽度
+
 # ─── fetch ────────────────────────────────────────────────
 
 
 def cmd_fetch(args, settings):
     """抓取 Arxiv 论文 → LLM 评分 → 写入数据库 → 记录抓取日志"""
-    from src.config import get_active_keywords
+    from src.config.settings import get_active_keywords, today_str
     from src.db import PaperDB
-    from src.network.fetch_pipeline import run_fetch_pipeline
+    from src.pipeline.fetch import run_fetch_pipeline
 
-    today = datetime.date.today().isoformat()
+    today = today_str()  # 显示横幅与入库 fetch_date 同口径（系统本地时间）
     mode = getattr(args, "mode", "incremental")
     print(f"[{today}] === Paper Research Fetch 开始 (模式: {mode}) ===")
+    logger.info("fetch 开始: mode=%s keyword=%s", mode, args.keyword or "")
 
-    keywords = get_active_keywords()
+    keywords = get_active_keywords(settings)  # 复用 dispatch 已加载的 settings，避免重复读盘
     if args.keyword:
         keywords = [kw for kw in keywords if kw.keyword == args.keyword]
         if not keywords:
@@ -29,7 +34,8 @@ def cmd_fetch(args, settings):
             return
     print(f"  活跃关键词: {len(keywords)} 个")
 
-    max_results = args.max_results if args.max_results > 0 else settings.fetch.max_results
+    # 0 = 使用各源配置的 max_results（run_fetch_pipeline 仅 >0 时覆盖）
+    max_results = args.max_results
 
     db = PaperDB()
     asyncio.run(
@@ -40,10 +46,6 @@ def cmd_fetch(args, settings):
 
     if args.dry_run:
         return
-
-    server_url = f"http://{settings.server.host}:{settings.server.port}"
-    print(f"  [i] 启动服务: {server_url}")
-    print(f"  [i] 查看待审阅论文: {server_url}/")
 
 
 # ─── serve ────────────────────────────────────────────────
@@ -63,43 +65,20 @@ def _open_browser_when_ready(url: str, host: str, port: int, timeout: float = 30
     webbrowser.open(url)
 
 
-def _redirect_stdio_if_detached() -> None:
-    """无控制台环境（pythonw.exe / 后台任务）下把 stdout/stderr 重定向到日志文件。
-
-    pythonw.exe 中 sys.stdout/sys.stderr 为 None，直接 print 会抛 AttributeError；
-    重定向后也保证后台运行时日志可追溯。
-    """
-    if sys.stdout is not None and sys.stderr is not None:
-        return
-    from src.config import OUTPUT_DIR
-
-    log_dir = OUTPUT_DIR / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    # 该文件句柄需存活整个进程生命周期，不能用 with 管理
-    log_file = log_dir / "serve-stdout.log"
-    try:
-        fh = open(log_file, "a", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115
-    except OSError:
-        # 日志被其他进程占用（如旧实例未退净）时退回按 PID 命名，避免启动即崩
-        import os
-
-        fh = open(log_dir / f"serve-stdout-{os.getpid()}.log", "a", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115
-    if sys.stdout is None:
-        sys.stdout = fh
-    if sys.stderr is None:
-        sys.stderr = fh
-
-
 def cmd_serve(_args, settings):
     """启动 FastAPI 本地 Web 服务"""
-    _redirect_stdio_if_detached()
+    # 无控制台环境（pythonw.exe / 后台任务）下把 stdout/stderr 重定向到日志文件
+    from src.logging_setup import redirect_stdio_if_detached
 
-    from src.serve.server import run_server
+    redirect_stdio_if_detached()
+
+    from src.serve import run_server
 
     server_url = f"http://{settings.server.host}:{settings.server.port}"
     print("  [OK] Starting server...")
     print(f"  [OK] Review: {server_url}/")
     print(f"  [OK] API:   {server_url}/docs")
+    logger.info("serve 启动: %s", server_url)
 
     # 仅交互式终端自动打开浏览器；计划任务等后台启动（无 TTY）不打开
     if sys.stdout.isatty():
@@ -114,27 +93,16 @@ def cmd_serve(_args, settings):
 # ─── status ───────────────────────────────────────────────
 
 
-def cmd_status(args, settings):
+def cmd_status(_args, settings):
     """显示统计仪表盘"""
     from src.db import PaperDB
-    from src.zotero import ZoteroClient
 
     db = PaperDB()
     stats = db.get_stats()
     logs = db.get_recent_logs(limit=5)
+    logger.info("status 查询: total=%s pending=%s", stats["total"], stats["pending"])
 
-    try:
-        zotero = ZoteroClient(
-            settings.zotero.api_key,
-            settings.zotero.library_id,
-            settings.zotero.library_type,
-        )
-        zotero_stats = zotero.get_stats()
-    except Exception as e:
-        print(f"  ⚠️ 连接 Zotero 失败: {e}")
-        zotero_stats = {}
-
-    W = 62
+    W = _DASH_WIDTH
     S = W - 2
     L = W - 4
 
@@ -153,13 +121,25 @@ def cmd_status(args, settings):
 
     # 标记分布
     lines.append(line("  Mark Distribution"))
-    lines.append(line(f"    忽略: {stats['by_mark'].get('ignore', 0):>4}   延后: {stats['by_mark'].get('lurk', 0):>4}"))
+    lines.append(
+        line(
+            f"    忽略: {stats['by_mark'].get('ignore', 0):>4}   延后: {stats['by_mark'].get('lurk', 0):>4}"
+        )
+    )
     lines.append(sep())
 
     # 评级分布
     lines.append(line("  AI Remark Distribution"))
-    lines.append(line(f"    ⭐重要: {stats['by_remark'].get('important', 0):>4}  👍有用: {stats['by_remark'].get('useful', 0):>4}"))
-    lines.append(line(f"    📄浏览: {stats['by_remark'].get('browse', 0):>4}  🗑️跳过: {stats['by_remark'].get('skip', 0):>4}"))
+    lines.append(
+        line(
+            f"    ⭐重要: {stats['by_remark'].get('important', 0):>4}  👍有用: {stats['by_remark'].get('useful', 0):>4}"
+        )
+    )
+    lines.append(
+        line(
+            f"    📄浏览: {stats['by_remark'].get('browse', 0):>4}  🗑️跳过: {stats['by_remark'].get('skip', 0):>4}"
+        )
+    )
     lines.append(sep())
 
     # 关键词分布
@@ -169,12 +149,6 @@ def cmd_status(args, settings):
             lines.append(line(f"    {kw}: {count} 篇"))
     lines.append(sep())
 
-    # Zotero 统计
-    if zotero_stats:
-        lines.append(line(f"  Zotero 论文总数:     {zotero_stats.get('total', 0):>5}"))
-        lines.append(line(f"  已审阅:              {zotero_stats.get('reviewed', 0):>5}"))
-        lines.append(sep())
-
     # 最近抓取日志
     lines.append(line("[+] Recent Fetch Logs"))
     lines.append(sep())
@@ -183,7 +157,9 @@ def cmd_status(args, settings):
             icon = "OK" if log.get("status") == "success" else "!!"
             ts = (log.get("run_time", "") or "")[:16]
             lines.append(
-                line(f"  {icon} {ts}  Fetched:{log.get('papers_fetched', 0):>3}  New:{log.get('papers_new', 0):>3}")
+                line(
+                    f"  {icon} {ts}  Fetched:{log.get('papers_fetched', 0):>3}  New:{log.get('papers_new', 0):>3}"
+                )
             )
     else:
         lines.append(line("  (no fetch logs yet)"))
@@ -199,14 +175,8 @@ def cmd_status(args, settings):
 def cmd_notify(args, settings):
     """手动发送邮件通知"""
     from src.db import PaperDB
-    from src.notify import EmailNotifier
+    from src.notify.report import send_fetch_report
 
     db = PaperDB()
-    pending = db.get_pending()
-
-    notifier = EmailNotifier(settings.notification)
-    notifier.send_fetch_report(
-        {"new": len(pending)},
-        pending,
-        [kw.keyword for kw in settings.keywords],
-    )
+    result = send_fetch_report(settings, db)
+    logger.info("notify 触发: sent=%s reason=%s", result["sent"], result.get("reason"))

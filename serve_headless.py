@@ -7,8 +7,8 @@ python.exe，Windows 会为该子进程自动分配控制台窗口（开机弹�
 
 计划任务配置：
     Execute:   <base 解释器目录>\\pythonw.exe
-    Arguments: "E:\\ZGCA-USTC-Phd\\Assert\\paper research\\serve_headless.py" serve
-    WorkDir:   E:\\ZGCA-USTC-Phd\\Assert\\paper research
+    Arguments: "<项目根目录>\\serve_headless.py" serve
+    WorkDir:   <项目根目录>
 """
 
 import site
@@ -16,22 +16,34 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VENV_SITE = ROOT / ".venv" / "Lib" / "site-packages"
-if VENV_SITE.is_dir():
+
+
+def _find_venv_site_packages(root: Path) -> Path | None:
+    """定位 venv 的 site-packages（兼容 Windows/POSIX 布局）。"""
+    candidates = (
+        root / ".venv" / "Lib" / "site-packages",  # Windows venv
+        root / ".venv" / "lib" / "python3.11" / "site-packages",  # POSIX
+    )
+    for p in candidates:
+        if p.is_dir():
+            return p
+    for p in (root / ".venv").glob("**/site-packages"):  # 兜底：任意 Python 版本
+        if p.is_dir():
+            return p
+    return None
+
+
+VENV_SITE = _find_venv_site_packages(ROOT)
+if VENV_SITE is not None:
     site.addsitedir(str(VENV_SITE))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # pythonw 下 sys.stdout/stderr 为 None：先把它们重定向到日志文件，
-# 否则任何 print/异常 traceback 都会直接杀死进程且不留痕迹
-_LOG_DIR = ROOT / "output" / "logs"
-_LOG_DIR.mkdir(parents=True, exist_ok=True)
-if sys.stdout is None or sys.stderr is None:
-    _fh = open(_LOG_DIR / "serve-stdout.log", "a", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115
-    if sys.stdout is None:
-        sys.stdout = _fh
-    if sys.stderr is None:
-        sys.stderr = _fh
+# 否则任何 print/异常 traceback 都会直接杀死进程且不留痕迹（收敛自 logging_setup）
+from src.logging_setup import redirect_stdio_if_detached  # noqa: E402
+
+redirect_stdio_if_detached()
 
 from src.main import main  # noqa: E402
 

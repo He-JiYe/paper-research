@@ -24,11 +24,10 @@ env/
 .uv/
 
 # ── Project runtime data ─────────────────────────────
+# 静态资源（前端 SPA / 邮件模板 / app-meta.json）统一在 app/（git 版本化）；
+# data/ 仅存运行时数据库等动态数据，整体忽略
 data/*
-# 静态数据 JSON（app-meta.json）纳入 git 版本管理；动态数据（papers.db 等）保持忽略
-!data/static/
-!data/static/app-meta.json
-output/
+log/
 *.db
 *.db-shm
 *.db-wal
@@ -60,4 +59,11 @@ Desktop.ini
 .workbuddy
 
 # ── tests ─────────────────────────────────────
-tests/
+# tests/ 已纳入版本控制
+
+# ── download ─────────────────────────────────────
+download/
+
+# ── examples ─────────────────────────────────────
+# few-shot 示例由运行时按关键词自动生成（手工补充才提交）
+examples/*-few-shot.txt

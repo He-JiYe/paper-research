@@ -8,26 +8,31 @@
 #     setx EMAIL_PASSWORD "smtp-auth-code"
 
 llm:
+  # provider: deepseek | ollama
+  #   - deepseek：OpenAI 兼容接口（api_key 必填，api_base 指 https://api.deepseek.com 或任意兼容端点）
+  #   - ollama：本地模型原生接口（POST {api_base}/api/chat，无需 api_key，api_base 默认 http://localhost:11434）
   provider: deepseek
-  model: deepseek-chat            # 如使用其他模型请确认 API 侧模型名有效
+  model: deepseek-v4-flash        # 如使用其他模型请确认 API 侧模型名有效
   api_key: ${DEEPSEEK_API_KEY}
   api_base: https://api.deepseek.com
   temperature: 0.3
   max_tokens: 2000
 
 fetch:
-  source: arxiv
-  max_concurrent_requests: 3      # arxiv 官方建议 <=1 请求/3 秒，勿调大
-  lookback_days: 3
-  max_results: 20
-  sort_by: lastUpdatedDate
+  # 多数据源：每个 source 提供对应 FetchOptions 的参数（registry 按 source 名解析）
+  sources:
+    - source: arxiv
+      max_results: 20
+      lookback_days: 3
+      sort_by: lastUpdatedDate   # relevance | lastUpdatedDate | submittedDate（增量/历史由下游按模式覆盖）
 
+# 关键词：全源共享，固定形式 keyword/categories/active（无每词个性化）
 keywords:
   - keyword: test-time adaptation
-    arxiv_cats: [cs.CV, cs.LG]
+    categories: [cs.CV, cs.LG]
     active: true
   - keyword: large language model
-    arxiv_cats: [cs.CL]
+    categories: [cs.CL]
     active: true
 
 notification:
@@ -37,13 +42,12 @@ notification:
     smtp_port: 465
     username: your-email@qq.com
     password: ${EMAIL_PASSWORD}
-    from: your-email@qq.com
-    to: your-email@qq.com
+    from_addr: your-email@qq.com
+    to_addr: your-email@qq.com
 
 scheduler:
   enabled: true
   fetch_time: "08:30"
-  timezone: Asia/Shanghai
   catch_up_on_start: true          # serve 启动时若今天错过抓取则自动补抓
 
 server:

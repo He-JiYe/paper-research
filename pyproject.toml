@@ -72,8 +72,13 @@ ignore = [
     "FBT",     # 测试中 bool 参数没问题
     "N806",    # 允许 MockClassName 命名风格
     "SIM117",  # 允许嵌套 with 以保持可读性
+    "PT018",   # 断言拆多行（测试可读性）
+    "PT011",   # pytest.raises 宽泛（测试断言灵活性）
+    "B905",    # zip strict 参数（测试简洁）
+    "RUF005",  # 列表拼接（测试可读性）
+    "RUF043",  # match 正则转义（测试）
+    "E731",    # lambda 赋值（测试）
 ]
-"src/serve/server.py" = ["RUF006"]  # asyncio.create_task 返回值可选
 "src/commands.py" = ["N806"]  # W/S/L 为布局常量，大写保持可读性
 
 [tool.ruff.format]
@@ -99,6 +104,7 @@ omit = []
 
 [tool.coverage.report]
 show_missing = true
+fail_under = 90
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
@@ -116,4 +122,5 @@ dev = [
     "pytest-mock>=3.15.0",
     "pytest-cov>=7.0.0",
     "pre-commit>=4.0.0",
+    "httpx2>=2.10.0",
 ]

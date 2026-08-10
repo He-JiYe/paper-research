@@ -11,6 +11,11 @@ if str(ROOT_DIR) not in sys.path:
 
 
 def main():
+    # 统一日志：每日 YYYY-MM-DD.log + errors.log（覆盖所有 CLI 路径，幂等）
+    from src.logging_setup import setup_logging
+
+    setup_logging()
+
     # 强制 UTF-8 输出（pythonw 等无控制台环境下 sys.stdout 为 None，需判空）
     import contextlib
 
@@ -20,12 +25,12 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="paper-research",
-        description="论文自动调研工具：定时抓取 Arxiv，LLM 评分，交互式审阅，Zotero 集成",
+        description="论文自动调研工具：定时抓取论文，LLM 评分，交互式审阅，Zotero 集成",
     )
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
 
     # fetch
-    fetch_parser = subparsers.add_parser("fetch", help="抓取 Arxiv 论文并生成摘要")
+    fetch_parser = subparsers.add_parser("fetch", help="抓取论文并生成摘要")
     fetch_parser.add_argument("--keyword", "-k", help="仅抓取指定关键词")
     fetch_parser.add_argument("--dry-run", action="store_true", help="预览模式，不实际写入")
     fetch_parser.add_argument(
@@ -63,48 +68,35 @@ def main():
 
 def dispatch(args):
     """根据命令分发到对应处理函数。"""
-    from src.config import load_settings
+    from src.config.loader import load_settings
 
     settings = load_settings()
 
     # 验证 Zotero 配置
     if args.command in ("serve", "status"):
-        _validate_zotero(settings)
+        if not settings.zotero.api_key:
+            print("  ⚠️ 未配置 Zotero API Key（导入 Zotero 功能将不可用）")
+            print("  💡 请设置环境变量 ZOTERO_API_KEY 或修改 config/config.yaml")
+        if not settings.zotero.library_id:
+            print("  ⚠️ 未配置 Zotero Library ID")
+            print("  💡 请设置环境变量 ZOTERO_LIBRARY_ID 或修改 config/config.yaml")
 
-    try:
-        if args.command == "fetch":
-            from src.commands import cmd_fetch
+    if args.command == "fetch":
+        from src.commands import cmd_fetch
 
-            cmd_fetch(args, settings)
-        elif args.command == "serve":
-            from src.commands import cmd_serve
+        cmd_fetch(args, settings)
+    elif args.command == "serve":
+        from src.commands import cmd_serve
 
-            cmd_serve(args, settings)
-        elif args.command == "status":
-            from src.commands import cmd_status
+        cmd_serve(args, settings)
+    elif args.command == "status":
+        from src.commands import cmd_status
 
-            cmd_status(args, settings)
-        elif args.command == "notify":
-            from src.commands import cmd_notify
+        cmd_status(args, settings)
+    elif args.command == "notify":
+        from src.commands import cmd_notify
 
-            cmd_notify(args, settings)
-    except Exception as e:
-        print(f"  ❌ 命令执行失败: {e}")
-        raise
-
-
-def _validate_zotero(settings):
-    """检查 Zotero 配置（仅警告，不阻断）。
-
-    serve 对 Zotero 连接失败已有优雅降级（审阅页仍可用），
-    因此这里只提示配置缺失，不再 sys.exit。
-    """
-    if not settings.zotero.api_key:
-        print("  ⚠️ 未配置 Zotero API Key（导入 Zotero 功能将不可用）")
-        print("  💡 请设置环境变量 ZOTERO_API_KEY 或修改 config/config.yaml")
-    if not settings.zotero.library_id:
-        print("  ⚠️ 未配置 Zotero Library ID")
-        print("  💡 请设置环境变量 ZOTERO_LIBRARY_ID 或修改 config/config.yaml")
+        cmd_notify(args, settings)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,4 @@
+Paper Research - {today}
+关键词: {keywords_str}
+{important_label}: {important} | {useful_label}: {useful} | {pending_label}: {pending} | {total_label}: {total}
+审阅页面: {server_url}

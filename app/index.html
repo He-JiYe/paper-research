@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paper Research — 论文审阅</title>
+    <link rel="icon" href="data:,">
+    <script>
+        /* 主题初始化（防闪烁）：localStorage 优先，其次跟随系统 */
+        (function () {
+            try {
+                var t = localStorage.getItem('pr-theme');
+                if (!t) {
+                    t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+                }
+                document.documentElement.setAttribute('data-theme', t);
+            } catch (e) {}
+        })();
+    </script>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-main">
+                <h1>📄 论文审阅</h1>
+                <div class="update-time">
+                    <span id="update-time-text">更新于 --</span>
+                    <span class="dot-sep">·</span>
+                    <span id="total-count-text">共 -- 篇</span>
+                    <span class="dot-sep">·</span>
+                    <span>待审核 <strong id="unmarked-count">--</strong></span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button onclick="loadPapers()" class="action-btn">🔃 刷新</button>
+                <button onclick="openImportHistory()" class="action-btn" title="查看/重新打开导入记录">📥 导入记录</button>
+                <button onclick="toggleTheme()" class="action-btn theme-toggle" id="theme-toggle" title="切换亮色/深色">
+                    <span class="theme-icon" id="theme-icon">🌙</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item important">
+                <div class="stat-num" id="stat-important">0</div>
+                <div class="stat-label" id="stat-label-important">⭐ 重要</div>
+            </div>
+            <div class="stat-item useful">
+                <div class="stat-num" id="stat-useful">0</div>
+                <div class="stat-label" id="stat-label-useful">👍 关注</div>
+            </div>
+            <div class="stat-item browse">
+                <div class="stat-num" id="stat-browse">0</div>
+                <div class="stat-label" id="stat-label-browse">📄 浏览</div>
+            </div>
+            <div class="stat-item unmarked">
+                <div class="stat-num" id="stat-unmarked">0</div>
+                <div class="stat-label" id="stat-label-unmarked">⏳ 待审核</div>
+            </div>
+        </div>
+
+        <div class="filters">
+            <div class="filters-row">
+                <!-- 评级筛选 -->
+                <button class="filter-btn active" onclick="filterByRemark('all', this)">全部</button>
+                <button class="filter-btn" id="filter-btn-important" onclick="filterByRemark('important', this)">⭐ 重要</button>
+                <button class="filter-btn" id="filter-btn-useful" onclick="filterByRemark('useful', this)">👍 关注</button>
+                <button class="filter-btn" id="filter-btn-browse" onclick="filterByRemark('browse', this)">📄 浏览</button>
+                <button class="filter-btn" id="filter-btn-skip" onclick="filterByRemark('skip', this)">🗑️ 跳过</button>
+                <!-- 日期范围筛选（与评级同排） -->
+                <span class="filter-divider"></span>
+                <button class="range-btn active" data-range="all" onclick="applyRange('all', this)">全部</button>
+                <button class="range-btn" data-range="today" onclick="applyRange('today', this)">今日</button>
+                <button class="range-btn" data-range="7d" onclick="applyRange('7d', this)">近7天</button>
+                <button class="range-btn" data-range="30d" onclick="applyRange('30d', this)">近30天</button>
+                <!-- 批量导入 Zotero（右对齐） -->
+                <div class="batch-toolbar">
+                    <span id="batch-selected-count" class="batch-count">已选 0 篇</span>
+                    <button onclick="openBatchImport()" id="batch-import-btn" class="btn btn-primary" disabled>📚 导入 Zotero</button>
+                </div>
+            </div>
+            <div class="filters-row filters-tools">
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="paper-search" class="search-input"
+                           placeholder="搜索标题 / 作者 / 关键词 / 摘要..."
+                           oninput="onSearchInput(this.value)">
+                    <button class="search-clear" id="search-clear" onclick="clearSearch()" title="清除">×</button>
+                </div>
+                <select id="sort-select" class="sort-select" onchange="applySort(this.value)" title="排序方式">
+                    <option value="" disabled selected>排序方式</option>
+                    <option value="score">⭐ 评分高 → 低</option>
+                    <option value="published">📅 发布时间新 → 旧</option>
+                    <option value="fetch">📥 抓取日期新 → 旧</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="paper-list">
+            <div class="empty-state"><p><span class="empty-icon">📭</span>加载中...</p></div>
+        </div>
+    </div>
+
+    <!-- Zotero 分类下拉数据源（批量面板逐条分类选择共用） -->
+    <datalist id="zi-collections"></datalist>
+
+    <!-- Zotero 批量导入面板 -->
+    <div id="zotero-batch-panel" class="modal-overlay" style="display:none;">
+        <div class="modal-card modal-wide">
+            <h3 class="modal-title">📚 批量导入 Zotero</h3>
+            <p class="modal-hint">逐条可改短标题、独立选择分类。</p>
+            <div id="zb-items" class="zb-items"></div>
+            <div class="modal-actions">
+                <button id="zb-confirm" onclick="confirmBatchImport()" class="btn btn-primary btn-flex">确认导入</button>
+                <button onclick="closeBatchImport()" class="btn btn-ghost">关闭</button>
+            </div>
+            <div id="zb-status" class="modal-status"></div>
+        </div>
+    </div>
+
+    <!-- Zotero 导入进度横幅（后台任务 + 日志） -->
+    <div id="import-banner" class="import-banner" style="display:none;">
+        <div class="import-banner-header">
+            <span id="import-banner-title">Zotero 导入中...</span>
+            <div class="modal-actions">
+                <button onclick="hideImportBanner()" class="btn btn-ghost">隐藏</button>
+            </div>
+        </div>
+        <div id="import-banner-log" class="import-banner-log"></div>
+    </div>
+
+    <script src="/app.js" defer></script>
+</body>
+</html>

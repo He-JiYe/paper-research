@@ -1,93 +1,145 @@
 """数据源抽象基类 —— 所有数据源必须继承此类并实现抽象方法。
 
 扩展方式:
-    1. 继承 ``BaseSource``，实现所有抽象方法
-    2. 通过 ``factory.register_source("名称", 子类)`` 注册
-    3. 在 ``settings.json`` 中设置 ``source`` 为注册的名称
+    1. 继承 ``BaseSource``，实现抽象方法并通过 ``REGISTRY.sources.register("名称", 子类)`` 注册
+    2. 继承 ``FetchOptions``，实现抓取参数 dataclass 并通过 ``REGISTRY.options.register("名称", 子类)`` 注册
+    3. 在 ``config.yaml`` 中设置 ``fetch.sources[].source`` 为注册的名称
+
+契约方向：
+- ``core.models.Record`` 是数据源与数据库共享的论文元数据契约；
+    - ``FetchOptions`` 由 network 规定 ``Options`` 和 ``RawSearch`` 格式，调用方（config）遵守规定。
+    - ``BaseSource._fetch()`` 根据 ``RawSearch`` 格式进行 request，并生成 ``RawResult``（network 侧规定）；
+    - ``BaseSource.adapt()`` 把 ``RawResult`` 转成 ``Record``；
+    - ``BaseSource.fetch()`` 是模板方法：异步遍历不同关键词 → adapt → list[Record]；
+
+- ``source``: 规定 ``RawSearch`` 和 ``RawResult`` 的格式，并进一步规定 ``FetchOptions`` 和 ``Source`` 方法，调用方遵守规定。
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from itertools import chain
+from typing import Generic, TypeVar
+
+from src.core.fetch import FetchOptions, RawSearch
+from src.core.models import Record
+
+logger = logging.getLogger(__name__)
+
+# 数据源原生结果类型，由各子类指定
+RawResult = TypeVar("RawResult")
 
 
-class BaseSource(ABC):
+class BaseSource(ABC, Generic[RawResult]):
     """数据源基类。
 
     定义数据源的标准接口，所有数据源（Arxiv、PubMed、DBLP 等）必须遵循此接口。
-    通过 ``factory.get_source()`` 获取数据源实例。
+    通过 ``REGISTRY.sources.get("名称")`` 获取数据源类。
 
     扩展示例::
 
-        class PubmedSource(BaseSource):
-            async def fetch_all(self, keywords, settings, ...):
-                ...
-            async def fetch_by_ids(self, ids):
-                ...
-            async def search(self, query, ...):
-                ...
+        @REGISTRY.sources.register("pubmed")
+        class PubmedSource(BaseSource[pmapi.Result]):
+            @property
+            def source_name(self) -> str:
+                return "pubmed"
 
-        register_source("pubmed", PubmedSource)
+            async def _fetch(
+                self, kw, options
+            ) -> list[pmapi.Result]: ...  # 单个搜索项 → 一次 request
+
+            async def adapt(self, items: list[pmapi.Result]) -> list[Record]: ...
     """
 
-    # ── 批量抓取 ────────────────────────────────────────────────
+    # ── 适配器 ────────────────────────────────────────────────
 
     @abstractmethod
-    async def fetch_all(
+    async def adapt(
         self,
-        keywords: list[dict],
-        settings: Any,
-        max_results: int = 50,
-        historical: bool = False,
-        skip_ids: set[str] | None = None,
-    ) -> tuple[list[dict], int, int]:
-        """批量抓取论文。
+        items: list[RawResult],
+    ) -> list[Record]:
+        """将数据源原生结果转化成论文元数据（Record）。
 
-        Args:
-            keywords:     关键词列表，每项含 ``keyword``, ``arxiv_cats``(可选), ``active``
-            settings:     全局配置对象（通常为 ``AppConfig``）
-            max_results:  每个关键词最大结果数
-            historical:   ``True``=全量回溯不限制时间，``False``=仅限时间窗口
-            skip_ids:     需要跳过的已有 ID 集合（已入库的论文）
-
-        Returns:
-            (去重后的论文列表, 原始总篇数, 重复篇数)
+        Note:
+            ``Record.keyword_match`` 由 ``_try_fetch`` 在 adapt 之后统一回填，
+            各源在此无需关心关键词。
         """
         ...
 
-    # ── 按 ID 获取 ─────────────────────────────────────────────
+    # ── 单关键词抓取 ─────────────────────────────────────────────
 
     @abstractmethod
-    async def fetch_by_ids(self, ids: list[str]) -> list[dict]:
-        """通过 ID 列表精确获取论文元数据。
-
-        Args:
-            ids: 数据源专有 ID 列表（如 Arxiv ID, PMID）
-
-        Returns:
-            论文元数据列表
-        """
-        ...
-
-    # ── 搜索（无日期限制）───────────────────────────────────────
-
-    @abstractmethod
-    async def search(
+    async def _fetch(
         self,
-        query: str,
-        max_results: int = 20,
-        categories: list[str] | None = None,
-    ) -> list[dict]:
-        """搜索论文（不限时间，用于前端预览或交互式搜索）。
+        kw: RawSearch,
+        options: FetchOptions,
+    ) -> list[RawResult]:
+        """抓取单个搜索项的结果。
 
         Args:
-            query:        搜索关键词，可包含 ``ti:``, ``au:`` 等前缀
-            max_results:  最大结果数
-            categories:   可选分类过滤列表
+            kw: ``to_list()`` 产出的单个搜索项。
+                约定为 ``(keyword, 原生Search)`` 元组 —— 源内部解包后执行一次 request，
+                keyword 供过滤/重排等按关键词逻辑使用。
+            options: 按次运行参数（``FetchOptions``，由调用方构建）
 
         Returns:
-            论文元数据列表
+            该搜索项的原生结果列表
         """
         ...
 
+    # ── 单关键词抓取（容错模板）─────────────────────────────────
+
+    async def _try_fetch(
+        self,
+        kw: RawSearch,
+        options: FetchOptions,
+    ) -> list[Record]:
+        """抓取单个关键词 → adapt → 回填 keyword_match（容错包装）。
+
+        Args:
+            kw: ``(keyword, 原生Search)`` 元组
+            options: 按次运行参数
+
+        Returns:
+            该关键词的 Record 列表；失败时返回空列表
+        """
+        keyword, _ = kw
+        try:
+            results = await self._fetch(kw, options)
+            records = await self.adapt(results)
+            for r in records:
+                r.keyword_match = keyword
+            logger.info("[%s]: %s 篇", keyword, len(results))
+            return records
+        except Exception as e:
+            logger.warning("关键词 [%s] 抓取失败: %s", keyword, e)
+            return []
+
+    # ── 批量抓取（模板方法）────────────────────────────────────────
+
+    async def fetch(
+        self,
+        options: FetchOptions,
+    ) -> list[Record]:
+        """异步遍历不同关键词 → adapt。
+
+        模板方法：为每个关键词调用 ``_try_fetch``（内部含 ``_fetch`` + ``adapt``）。
+
+        Args:
+            options: 按次运行参数（``FetchOptions``，由调用方构建）
+
+        Returns:
+            论文元数据列表（不去重）
+        """
+        lists = await asyncio.gather(*[self._try_fetch(kw, options) for kw in options.to_list()])
+        return list(chain.from_iterable(lists))
+
+    # ── 数据源名称 ─────────────────────────────────────────────
+
+    @property
+    @abstractmethod
+    def source_name(self) -> str:
+        """获取数据源名称（注册名）。"""
+        ...
