@@ -1,18 +1,20 @@
 ---
 name: paper-research
 description: |
-  论文自动调研工具 Paper Research 的初始化配置与日常操作。
+  论文自动调研工具 Paper Research 的克隆、环境配置与日常操作。
   当用户要求以下事情时使用本 skill：
-  - 初始化 / 配置 / 重置 / 清除 论文调研工具、数据库、日志或 few-shot 示例
+  - 克隆项目 / 初始化环境 / 安装全局命令 paper / 配置 / 重置 / 清除 工具、数据库、日志或 few-shot 示例
   - 配置 config.yaml（数据源 / 关键词 / LLM / 邮件通知 / 定时调度 / Zotero）
   - 启动 / 运行 / 打开 论文审阅 Web 服务或本地网页
+  - 注册 / 停止 开机自启（paper autostart）
   - 抓取 / 更新 / 同步 Arxiv 论文
   - 发送 / 查看 结果邮件 / 邮件通知
   - 查看 状态 / 统计
-  把「启动」「抓取」「通知」「状态」等自然语言指令映射为
-  `uv run paper-research fetch / serve / notify / status` 命令执行；
-  「初始化 / 配置 / 重置 / 清除」不经过 CLI 子命令，而是按本文第 1/2 节
-  直接操作文件（rm / 编辑 config.yaml / 调用 save_config_raw）。
+  把「启动」「抓取」「通知」「状态」「自启」等自然语言指令映射为
+  `uv run paper-research fetch / serve / notify / status / autostart` 或全局命令
+  `paper ...` 执行；
+  「克隆 / 初始化 / 配置 / 重置 / 清除」不经过 CLI 子命令，而是按本文第 1/2 节
+  直接操作文件（git clone / uv sync / rm / 编辑 config.yaml / 调用 save_config_raw）。
 ---
 
 # Paper Research Skill
@@ -20,7 +22,7 @@ description: |
 论文自动调研工具：每天定时抓取 Arxiv → LLM 评分（deepseek/ollama）→ SQLite 存储 →
 邮件通知 → Web 交互审阅 → 批量导入 Zotero。
 
-> 命令在项目根目录（bash）下执行。优先用 `uv run paper-research ...`；
+> 命令在项目根目录（bash）下执行。优先用 `uv run paper-research ...` 或全局命令 `paper ...`；
 > 若 `uv run` 报 `trampoline failed to canonicalize script path`（Windows + 路径含空格/中文），
 > 改用 venv 直调：`.venv/Scripts/python.exe -m src.main ...`（等价 CLI）。
 
@@ -33,35 +35,49 @@ description: |
 
 | 命令 | 作用 |
 | --- | --- |
-| `uv run paper-research fetch` | 增量抓取全部活跃关键词 → LLM 评分 → 入库 |
-| `uv run paper-research fetch -k <kw>` | 只抓指定关键词 |
-| `uv run paper-research fetch --dry-run` | 预览模式，不写库 |
-| `uv run paper-research fetch -m historical` | 全量回溯抓取 |
-| `uv run paper-research serve` | 启动 Web 审阅服务（内置每日调度器） |
-| `uv run paper-research notify` | 手动发送今日结果邮件 |
-| `uv run paper-research status` | 查看统计仪表盘 |
+| `paper serve`（或 `uv run paper-research serve`） | 启动 Web 审阅服务（内置每日调度器） |
+| `paper serve --open-browser`（`-o`） | 仅打开浏览器访问服务，不启动服务（服务已后台/开机自启运行） |
+| `paper fetch` | 增量抓取全部活跃关键词 → LLM 评分 → 入库 |
+| `paper fetch -k <kw>` | 只抓指定关键词 |
+| `paper fetch --dry-run` | 预览模式，不写库 |
+| `paper fetch -m historical` | 全量回溯抓取 |
+| `paper notify` | 手动发送今日结果邮件 |
+| `paper status` | 查看统计仪表盘 |
+| `paper autostart` | 注册开机自启（on/off/status/run-now；需管理员时打印手动命令） |
 
-## 1. 初始化与清理
+> `paper ...` 与 `uv run paper-research ...` 等价；全局命令 `paper` 需先安装（见 1.3）。
 
-用户要求「初始化 / 重置 / 清除」时按此流程执行，**每步删除前先向用户确认**：
+## 1. 项目克隆与环境配置
 
-1. **数据库** `data/papers.db`（含 `-wal` / `-shm`）
-   - 删除即清除全部论文与抓取日志：`rm -f data/papers.db data/papers.db-wal data/papers.db-shm`
-   - 重建无需手动：首次 `fetch` 或任何 `PaperDB()` 实例化自动幂等建表（`src/db/connection.py` `_init_db`）。
-2. **日志** `log/`（`src/paths.py` 的 `LOG_DIR` = 项目根 `log/`）
-   - 删除：`rm -rf log/`
-   - 重建：任意命令运行时的 `setup_logging()` 自动生成 `log/daily/YYYY-MM-DD.log` 与 `log/errors.log`。
-3. **few-shot 示例** `examples/{keyword}-few-shot.txt`
-   - 删除：`rm -f examples/*-few-shot.txt`
-   - 重建：复用 `src/scorer/prompt.py` 的 `load_examples(keyword)`（缺失时自动 touch 空文件并建目录，单一来源），对每个将配置的关键词执行：
-     ```bash
-     uv run python - <<'PY'
-     from src.scorer.prompt import load_examples
-     for k in ["关键词1", "关键词2"]:
-         load_examples(k)   # 自动创建 examples/{k}-few-shot.txt
-     PY
-     ```
-   - 空文件仅为占位，用户可手工补充评分样例；未补充时 prompt 不注入示例段。
+### 1.1 克隆项目
+
+```bash
+git clone https://github.com/He-JiYe/paper-research.git
+cd paper-research
+```
+
+### 1.2 环境配置（uv）
+
+```bash
+uv venv .venv                                     # 创建虚拟环境
+uv sync                                           # 按 uv.lock 安装依赖
+cp config/config.example.yaml config/config.yaml  # 生成实际配置（已 gitignore，不提交）
+```
+
+### 1.3 安装全局命令 paper（可选）
+
+任何目录的终端输入 `paper` 即可操作本项目（等价 `uv run paper-research <子命令>`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_paper.ps1
+```
+
+- 脚本做三件事：`uv tool install --editable . --force`（生成 `paper.exe` / `paper-research.exe`）、
+  把 uv 工具目录 `%USERPROFILE%\.local\bin` 加入用户 PATH（无需管理员）、自检 `paper --help`。
+- **editable 安装不复制源码**，`src/paths.py` 的 `ROOT_DIR` 仍指向项目根，config/data/log 位置不变；
+  之后改 `src/` 代码**即时生效**，无需重装（新增 entry point 除外）。
+- ⚠️ editable 指向项目当前路径：项目移动/删除后需重跑安装脚本；PATH 变更需**新开终端**生效。
+- 卸载：`powershell -ExecutionPolicy Bypass -File .\scripts\install_paper.ps1 -Uninstall`
 
 ## 2. 交互式配置 config.yaml
 
@@ -82,8 +98,8 @@ description: |
      api_key 写 `${DEEPSEEK_API_KEY}`。
    - `ollama`：api_key 留空、api_base 默认 `http://localhost:11434`、model 问本地已拉取模型名。
 4. **邮件通知（可选，默认不启用）**：`smtp_host`（无默认，留空则不发送，常用 `smtp.qq.com`）、`smtp_port`（默认 `465`）、
-   `username`（发信邮箱）、`password`（SMTP 授权码，写 `${EMAIL_PASSWORD}`）、`from_addr`（默认同 username）、
-   `to_addr`（收件人）。字段名与 `EmailConfig` 一致，config.yaml 按规范书写。
+   `username`（发信邮箱）、`password`（SMTP 授权码，写 `${EMAIL_PASSWORD}`）、`from`（默认同 username）、
+   `to`（收件人）。YAML 键用 `from`/`to`（加载器自动映射为 from_addr/to_addr）。
 5. **定时调度（可选，默认启用）**：`enabled`、`fetch_time`（HH:MM，默认 `"08:30"`，非法格式/越界值启动即报错）、
    `catch_up_on_start`（默认 `true`，开机错过定时自动补抓）。（「今日」口径用系统本地时间，无 timezone 配置项。）
 6. **服务端口（可选）**：默认 `8899`；host 固定 `127.0.0.1`（不要改 0.0.0.0）。
@@ -114,7 +130,7 @@ PY
 增量修改（加关键词、改抓取时间）直接用 Write 工具编辑 `config/config.yaml` 对应字段，保留现有 `${...}` 占位符。
 
 **密钥安全**：config.yaml 已 gitignore，但密钥仍用 `${ENV_VAR}` 占位符。写盘后引导用户在 PowerShell 设置
-（`setx` 持久化，需新开终端生效）：
+（`setx` 持久化，需新开终端生效；setx 属需管理员的操作，交给用户手动执行）：
 ```powershell
 setx DEEPSEEK_API_KEY "sk-xxxx"
 setx ZOTERO_API_KEY "xxxx"
@@ -135,20 +151,55 @@ uv run paper-research fetch             # 正式增量抓取 → 评分 → 入�
 
 | 用户意图 | 执行命令 | 说明 |
 | --- | --- | --- |
-| 启动服务 / 打开网页 / 开始审阅 / 打开审阅页面 | `uv run paper-research serve` | 交互式终端（TTY）下启动后自动打开浏览器 `http://127.0.0.1:8899`（端口取 config.yaml）。**后台/计划任务（无 TTY）不会自动开浏览器**，需手动访问打印的 URL。API 文档在同端口 `/docs` |
-| 抓取数据 / 更新论文 / 抓最新论文 | `uv run paper-research fetch` | 增量抓取 → LLM 评分 → 入库 |
-| 只抓某关键词 | `uv run paper-research fetch -k <keyword>` | |
-| 预览抓取（不写库） | `uv run paper-research fetch --dry-run` | |
-| 全量回溯抓取 | `uv run paper-research fetch -m historical` | |
-| 通知结果 / 发邮件 / 发送通知 | `uv run paper-research notify` | 手动发送今日报告邮件；今日无新论文则跳过 |
-| 查看状态 / 统计 | `uv run paper-research status` | |
+| 启动服务 / 打开网页 / 开始审阅 / 打开审阅页面 | `paper serve`（或 `uv run paper-research serve`） | 交互式终端（TTY）下启动后自动打开浏览器 `http://127.0.0.1:8899`（端口取 config.yaml）。**后台/计划任务（无 TTY）不会自动开浏览器**，需手动访问打印的 URL。API 文档在同端口 `/docs` |
+| 只打开浏览器（服务已后台/自启运行） | `paper serve --open-browser` | 不启动服务，仅打开浏览器访问服务地址 |
+| 抓取数据 / 更新论文 / 抓最新论文 | `paper fetch` | 增量抓取 → LLM 评分 → 入库 |
+| 只抓某关键词 | `paper fetch -k <keyword>` | |
+| 预览抓取（不写库） | `paper fetch --dry-run` | |
+| 全量回溯抓取 | `paper fetch -m historical` | |
+| 通知结果 / 发邮件 / 发送通知 | `paper notify` | 手动发送今日报告邮件；今日无新论文则跳过 |
+| 查看状态 / 统计 | `paper status` | |
+| 注册开机自启 | `paper autostart`（或 `paper autostart on`） | 等价 `.\scripts\register_task.ps1 -Mode startup` |
+| 停止开机自启 / 卸载自启任务 | `paper autostart off` | 等价 `.\scripts\register_task.ps1 -Action unregister` |
+| 查看自启状态 | `paper autostart status` | 普通用户可直接查询 |
+| 立即运行自启任务 | `paper autostart run-now` | |
 
 **重要**：`serve` 内置调度器（`src/serve/scheduler.py`）按 `scheduler.fetch_time` 每日定时抓取、
 错过后按 `catch_up_on_start` 补抓，且抓到新论文自动发邮件。所以「启动服务」已覆盖「定时抓取 + 通知」；
 `notify` 主要用于手动补发。
 
-## 4. 常见问题与注意
+**autostart 权限**：注册/卸载计划任务（on/off/run-now）需管理员权限；非管理员下 `paper autostart`
+不自动执行，而是打印需在【管理员 PowerShell】手动运行的确切命令（项目约定：不自提权，见文件头提示）。
 
+## 4. 初始化与清理
+
+用户要求「初始化 / 重置 / 清除」时按此流程执行，**每步删除前先向用户确认**：
+
+1. **数据库** `data/papers.db`（含 `-wal` / `-shm`）
+   - 删除即清除全部论文与抓取日志：`rm -f data/papers.db data/papers.db-wal data/papers.db-shm`
+   - 重建无需手动：首次 `fetch` 或任何 `PaperDB()` 实例化自动幂等建表（`src/db/connection.py` `_init_db`）。
+2. **日志** `log/`（`src/paths.py` 的 `LOG_DIR` = 项目根 `log/`）
+   - 删除：`rm -rf log/`
+   - 重建：任意命令运行时的 `setup_logging()` 自动生成 `log/daily/YYYY-MM-DD.log` 与 `log/errors.log`。
+3. **few-shot 示例** `examples/{keyword}-few-shot.txt`
+   - 删除：`rm -f examples/*-few-shot.txt`
+   - 重建：复用 `src/scorer/prompt.py` 的 `load_examples(keyword)`（缺失时自动 touch 空文件并建目录，单一来源），对每个将配置的关键词执行：
+     ```bash
+     uv run python - <<'PY'
+     from src.scorer.prompt import load_examples
+     for k in ["关键词1", "关键词2"]:
+         load_examples(k)   # 自动创建 examples/{k}-few-shot.txt
+     PY
+     ```
+   - 空文件仅为占位，用户可手工补充评分样例；未补充时 prompt 不注入示例段。
+
+## 5. 常见问题与注意
+
+- **`uv run` 报 trampoline 错误**：Windows + 路径含空格/中文时用 venv 直调：`.venv/Scripts/python.exe -m src.main ...`。
+- **`paper` 命令找不到**：PATH 未刷新（新开终端）或未安装（重跑 `scripts/install_paper.ps1`）；
+  editable 指向项目当前路径，项目移动/删除后需重装。
+- **`paper serve --open-browser` 打不开页面**：服务需已在运行（开机自启/后台任务），否则浏览器访问无响应。
+- **`paper autostart` 提示需要管理员**：on/off/run-now 需管理员，按打印的命令在【管理员 PowerShell】执行；`status` 普通用户可查。
 - **未配 LLM key**：评分自动走关键词相关性 fallback（`src/scorer/fallback.py`），流程不中断，`score_source` 标记 `no_api_key`。
 - **未配邮件**：`notify` 返回 `sent=false`，调度器不打扰。
 - **未配 Zotero**：`serve` 启动打印警告，审阅页面正常，仅「导入 Zotero」不可用。

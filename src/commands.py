@@ -65,8 +65,21 @@ def _open_browser_when_ready(url: str, host: str, port: int, timeout: float = 30
     webbrowser.open(url)
 
 
-def cmd_serve(_args, settings):
-    """启动 FastAPI 本地 Web 服务"""
+def _open_browser_only(settings):
+    """仅打开浏览器访问服务地址，不启动服务（服务需已在运行，如开机自启/后台任务）。"""
+    url = f"http://{settings.server.host}:{settings.server.port}/"
+    print(f"  [OK] Opening browser: {url}")
+    print("  [OK] 仅打开浏览器，未启动服务；请确认服务已在运行（如开机自启/后台任务）")
+    webbrowser.open(url)
+
+
+def cmd_serve(args, settings):
+    """启动 FastAPI 本地 Web 服务；--open-browser 时仅打开浏览器，不启动服务"""
+    # 仅打开浏览器模式：服务假定已由开机自启/后台运行，直接访问其地址
+    if getattr(args, "open_browser", False):
+        _open_browser_only(settings)
+        return
+
     # 无控制台环境（pythonw.exe / 后台任务）下把 stdout/stderr 重定向到日志文件
     from src.logging_setup import redirect_stdio_if_detached
 
@@ -180,3 +193,61 @@ def cmd_notify(args, settings):
     db = PaperDB()
     result = send_fetch_report(settings, db)
     logger.info("notify 触发: sent=%s reason=%s", result["sent"], result.get("reason"))
+
+
+# ─── autostart ─────────────────────────────────────────────
+
+
+def _is_admin() -> bool:
+    """当前进程是否以管理员权限运行（Windows）。"""
+    import ctypes
+
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def cmd_autostart(args):
+    """注册/停止开机自启（复用 scripts/register_task.ps1）。
+
+    注册/卸载计划任务需要管理员权限；非管理员时打印需在管理员 PowerShell
+    手动运行的确切命令，不自提权。status（查询任务状态）普通用户可直接执行。
+    """
+    import subprocess
+
+    from src.paths import ROOT_DIR
+
+    ps = ROOT_DIR / "scripts" / "register_task.ps1"
+    action = args.action
+    ps_args_map = {
+        "on": ["-Mode", "startup"],
+        "off": ["-Action", "unregister"],
+        "status": ["-Action", "status"],
+        "run-now": ["-Action", "run-now"],
+    }
+    label = {
+        "on": "注册开机自启",
+        "off": "停止开机自启（卸载计划任务）",
+        "status": "查看开机自启状态",
+        "run-now": "立即运行开机自启任务",
+    }[action]
+
+    if action != "status" and not _is_admin():
+        print(f"[paper] {label} 需要管理员权限。请在【管理员 PowerShell】中运行以下命令：")
+        print(f'    cd /d "{ROOT_DIR}"')
+        print(f"    .\\scripts\\register_task.ps1 {' '.join(ps_args_map[action])}")
+        return
+
+    subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ps),
+            *ps_args_map[action],
+        ],
+        check=False,
+    )

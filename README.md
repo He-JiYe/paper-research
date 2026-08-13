@@ -42,9 +42,10 @@
 | 「预览抓取（不写库）」 | `uv run paper-research fetch --dry-run` |
 | 「发送今日结果邮件」 | `uv run paper-research notify` |
 | 「查看状态 / 统计」 | `uv run paper-research status` |
+| 「注册 / 停止开机自启」 | `paper autostart` / `paper autostart off` |
 | 「初始化 / 重置 / 清除」 | 直接操作文件（删库 / 日志 / 示例，保留 `config`） |
 
-Skill 还内置**交互式配置流程**（一步步问答生成 / 更新 `config.yaml`）与
+Skill 还内置**项目克隆、环境配置、全局命令安装**与**交互式配置流程**（一步步问答生成 / 更新 `config.yaml`）、
 常见问题排查指引。在 Claude Code 中直接说明需求即可，其余交给 Skill 处理。
 
 ---
@@ -126,6 +127,89 @@ uv run paper-research serve
 
 ---
 
+## 全局命令 `paper`
+
+用 `uv tool install --editable .` 把本项目注册为全局命令，**任何目录**的终端输入 `paper` 即可操作
+（Git Bash / cmd / PowerShell 均可），等价 `uv run paper-research <子命令>`。editable 安装不复制源码，
+`src/paths.py` 的 `ROOT_DIR` 仍指向项目根，config/data/log 位置不变；之后修改 `src/` 代码**即时生效**，无需重装。
+
+### 安装（一次性）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_paper.ps1
+```
+
+脚本会：`uv tool install --editable . --force` 生成 `paper.exe` / `paper-research.exe`，并把 uv 工具目录
+`%USERPROFILE%\.local\bin` 加入用户 PATH（.NET API，无需管理员）。**需新开终端生效**。
+
+> ⚠️ editable 指向项目当前路径：项目移动/删除后需重跑安装脚本。
+
+### 子命令
+
+| 命令 | 作用 |
+|------|------|
+| `paper serve` | 启动 Web 审阅服务（等价 `uv run paper-research serve`） |
+| `paper serve --open-browser` | 仅打开浏览器访问服务（服务已由后台/开机自启运行） |
+| `paper fetch [参数...]` | 抓取论文（等价 `uv run paper-research fetch ...`） |
+| `paper status` | 统计仪表盘 |
+| `paper notify` | 手动发送今日邮件 |
+| `paper autostart` | 注册开机自启（等价 `.\scripts\register_task.ps1 -Mode startup`） |
+| `paper autostart off` | 停止开机自启（卸载计划任务） |
+| `paper autostart status` / `run-now` | 查看任务状态 / 立即运行 |
+
+**autostart 需管理员权限**：注册/卸载计划任务属提权操作，非管理员下 `paper autostart` 不自动执行，
+而是打印需在【管理员 PowerShell】手动运行的确切命令（脚本不自提权）。
+
+### 卸载
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_paper.ps1 -Uninstall
+```
+
+---
+
+## 命令参考
+
+```bash
+uv run paper-research fetch               # 抓取 + LLM 评分 + 写入 DB
+uv run paper-research fetch -k <keyword> # 仅抓取指定关键词
+uv run paper-research fetch -n 30        # 覆盖每关键词最大结果数
+uv run paper-research fetch --dry-run    # 预览模式
+uv run paper-research serve              # 启动 Web 审阅服务（含内置调度器）
+uv run paper-research serve --open-browser  # 仅打开浏览器访问服务（服务已由后台/开机自启运行）
+uv run paper-research status             # 统计仪表盘（DB 统计 + 抓取日志）
+uv run paper-research notify             # 手动发送今日邮件通知
+```
+
+Web API（serve 运行时，前后端分离）：完整接口文档见 **[docs/api.md](docs/api.md)**（9 条端口）。
+
+---
+
+## 持续化部署（本地）
+
+项目自带 `scripts/register_task.ps1`（Windows 任务计划注册脚本，用 base `pythonw.exe` 跑
+`serve_headless.py`，无控制台弹窗）：
+
+```powershell
+# 开机登录后自动后台启动 serve（内置调度器每天定时抓取）——推荐
+.\scripts\register_task.ps1 -Mode startup
+
+# 或：每天 08:30 定时执行一次 fetch（不常驻 serve）
+.\scripts\register_task.ps1 -Mode daily -Time "08:30"
+
+# 查看 / 立即运行 / 卸载
+.\scripts\register_task.ps1 -Action status
+.\scripts\register_task.ps1 -Action run-now
+.\scripts\register_task.ps1 -Action unregister
+```
+
+> 日志统一写入 `log/`（项目根）：每日 `daily/YYYY-MM-DD.log`（INFO+）+
+> 单一 `errors.log`（WARNING+ 关键信息）。console handler 仅在真实交互终端（isatty）
+> 挂载，结构化日志不重复；无控制台启动（pythonw/计划任务）时另有
+> `serve-stdout.log` 承接重定向后的裸 stdio（print / traceback），见 `src/logging_setup.py`。
+
+---
+
 ## LLM 评分后端（OpenAI 兼容 / Ollama）
 
 评分器通过统一的 `ChatProvider` 抽象调用 LLM，支持两类后端：
@@ -164,47 +248,6 @@ llm:
 
 ---
 
-## 命令参考
-
-```bash
-uv run paper-research fetch               # 抓取 + LLM 评分 + 写入 DB
-uv run paper-research fetch -k <keyword> # 仅抓取指定关键词
-uv run paper-research fetch -n 30        # 覆盖每关键词最大结果数
-uv run paper-research fetch --dry-run    # 预览模式
-uv run paper-research serve              # 启动 Web 审阅服务（含内置调度器）
-uv run paper-research status             # 统计仪表盘（DB 统计 + 抓取日志）
-uv run paper-research notify             # 手动发送今日邮件通知
-```
-
-Web API（serve 运行时，前后端分离）：完整接口文档见 **[docs/api.md](docs/api.md)**（9 条端口）。
-
----
-
-## 持续化部署（本地）
-
-项目自带 `scripts/register_task.ps1`（Windows 任务计划注册脚本，用 base `pythonw.exe` 跑
-`serve_headless.py`，无控制台弹窗）：
-
-```powershell
-# 开机登录后自动后台启动 serve（内置调度器每天定时抓取）——推荐
-.\scripts\register_task.ps1 -Mode startup
-
-# 或：每天 08:30 定时执行一次 fetch（不常驻 serve）
-.\scripts\register_task.ps1 -Mode daily -Time "08:30"
-
-# 查看 / 立即运行 / 卸载
-.\scripts\register_task.ps1 -Action status
-.\scripts\register_task.ps1 -Action run-now
-.\scripts\register_task.ps1 -Action unregister
-```
-
-> 日志统一写入 `log/`（项目根）：每日 `daily/YYYY-MM-DD.log`（INFO+）+
-> 单一 `errors.log`（WARNING+ 关键信息）。console handler 仅在真实交互终端（isatty）
-> 挂载，结构化日志不重复；无控制台启动（pythonw/计划任务）时另有
-> `serve-stdout.log` 承接重定向后的裸 stdio（print / traceback），见 `src/logging_setup.py`。
-
----
-
 ## 项目结构
 
 ```
@@ -221,7 +264,7 @@ paper-research/
 ├── data/
 │   └── papers.db               # SQLite 运行时数据库（动态数据，gitignore）
 ├── docs/api.md                 # Web API 接口文档（9 条端口）
-├── scripts/                    # 部署脚本（register_task.ps1）
+├── scripts/                    # 部署脚本（register_task.ps1 / install_paper.ps1）
 ├── src/
 │   ├── main.py                 # CLI 入口（argparse）
 │   ├── commands.py             # CLI 命令实现

@@ -80,8 +80,70 @@ class TestFetchArgs:
                 assert args.max_results == 50
 
 
+class TestServeArgs:
+    """测试 serve 命令参数解析"""
+
+    def test_serve_open_browser_flag(self):
+        """--open-browser 应正确解析"""
+        with patch("sys.argv", ["paper", "serve", "--open-browser"]):
+            with patch("src.main.dispatch") as mock_dispatch:
+                main()
+                args = mock_dispatch.call_args[0][0]
+                assert args.command == "serve"
+                assert args.open_browser is True
+
+    def test_serve_no_flag_default_false(self):
+        """未指定 --open-browser 时默认为 False"""
+        with patch("sys.argv", ["paper", "serve"]):
+            with patch("src.main.dispatch") as mock_dispatch:
+                main()
+                args = mock_dispatch.call_args[0][0]
+                assert args.command == "serve"
+                assert args.open_browser is False
+
+
+class TestAutostartArgs:
+    """测试 autostart 命令参数解析"""
+
+    def test_autostart_default_on(self):
+        """未指定 action 时默认应为 on"""
+        with patch("sys.argv", ["paper", "autostart"]):
+            with patch("src.main.dispatch") as mock_dispatch:
+                main()
+                args = mock_dispatch.call_args[0][0]
+                assert args.command == "autostart"
+                assert args.action == "on"
+
+    def test_autostart_off(self):
+        """autostart off 应正确解析"""
+        with patch("sys.argv", ["paper", "autostart", "off"]):
+            with patch("src.main.dispatch") as mock_dispatch:
+                main()
+                args = mock_dispatch.call_args[0][0]
+                assert args.action == "off"
+
+    def test_autostart_invalid_action(self):
+        """非法的 action 应报错"""
+        with patch("sys.argv", ["paper", "autostart", "bogus"]):
+            with pytest.raises(SystemExit):
+                main()
+
+
 class TestDispatch:
     """测试 dispatch 函数（命令分发）"""
+
+    def test_dispatch_autostart(self):
+        """dispatch 应调用 cmd_autostart 且不加载配置"""
+        with (
+            patch("src.commands.cmd_autostart") as mock_cmd,
+            patch("src.config.loader.load_settings") as mock_load,
+        ):
+            args = MagicMock(command="autostart")
+            from src.main import dispatch
+
+            dispatch(args)
+            mock_cmd.assert_called_once()
+            mock_load.assert_not_called()  # autostart 不应依赖 config.yaml
 
     def test_dispatch_fetch(self):
         """dispatch 应调用 cmd_fetch"""

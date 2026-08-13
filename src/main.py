@@ -49,13 +49,29 @@ def main():
     )
 
     # serve
-    subparsers.add_parser("serve", help="启动本地 Web 审阅服务")
+    serve_parser = subparsers.add_parser("serve", help="启动本地 Web 审阅服务")
+    serve_parser.add_argument(
+        "--open-browser",
+        "-o",
+        action="store_true",
+        help="仅打开浏览器访问服务地址，不启动服务（服务由开机自启/后台运行时使用）",
+    )
 
     # status
     subparsers.add_parser("status", help="查看统计信息")
 
     # notify
     subparsers.add_parser("notify", help="手动发送通知邮件")
+
+    # autostart
+    autostart_parser = subparsers.add_parser("autostart", help="注册/停止开机自启")
+    autostart_parser.add_argument(
+        "action",
+        nargs="?",
+        choices=["on", "off", "status", "run-now"],
+        default="on",
+        help="on=注册开机自启; off=停止(卸载计划任务); status=查看状态; run-now=立即运行",
+    )
 
     args = parser.parse_args()
 
@@ -68,6 +84,13 @@ def main():
 
 def dispatch(args):
     """根据命令分发到对应处理函数。"""
+    # autostart 不依赖 config.yaml，最先分发（未配置也能用）
+    if args.command == "autostart":
+        from src.commands import cmd_autostart
+
+        cmd_autostart(args)
+        return
+
     from src.config.loader import load_settings
 
     settings = load_settings()

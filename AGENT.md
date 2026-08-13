@@ -104,9 +104,15 @@ uv run paper-research fetch               # 抓取（多源×多关键词）→ 
 uv run paper-research fetch -k <keyword> # 仅抓取指定关键词
 uv run paper-research fetch --dry-run    # 预览模式，不写入数据库
 uv run paper-research serve               # 启动 Web 审阅服务（内置调度器每天定时抓取）
+uv run paper-research serve --open-browser  # 仅打开浏览器（服务已由后台/开机自启运行，不启动服务）
 uv run paper-research status              # 查看统计信息
 uv run paper-research notify              # 手动发送今日邮件通知
+uv run paper-research autostart           # 注册开机自启（on/off/status/run-now）
 ```
+
+全局命令 `paper`（`uv tool install --editable .` 安装，见 scripts/install_paper.ps1）为以上命令的别名：
+`paper fetch/serve/status/notify` 等价对应子命令，`paper autostart [on|off|status|run-now]` 转发到
+`scripts/register_task.ps1`（需管理员，非管理员打印手动命令）。editable 下 src/ 改动即时生效。
 
 ## 数据流
 

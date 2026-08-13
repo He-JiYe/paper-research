@@ -90,3 +90,99 @@ def test_cmd_serve_delegates(settings):
 
         cmd_serve(None, settings)
     run.assert_called_once_with(settings)
+
+
+def test_cmd_serve_open_browser_only(settings):
+    """--open-browser 时仅打开浏览器，不启动服务"""
+    args = SimpleNamespace(open_browser=True)
+    with (
+        patch("src.commands.webbrowser.open") as mock_open,
+        patch("src.serve.run_server") as run,
+    ):
+        from src.commands import cmd_serve
+
+        cmd_serve(args, settings)
+    mock_open.assert_called_once()
+    run.assert_not_called()
+
+
+def test_cmd_serve_open_browser_url(settings, capsys):
+    """--open-browser 打印服务地址（host:port）"""
+    args = SimpleNamespace(open_browser=True)
+    with patch("src.commands.webbrowser.open"):
+        from src.commands import cmd_serve
+
+        cmd_serve(args, settings)
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:8899" in out
+
+
+def test_is_admin_returns_bool():
+    """_is_admin 应返回 bool（Windows 下 ctypes 检测可用）"""
+    from src.commands import _is_admin
+
+    assert isinstance(_is_admin(), bool)
+
+
+def test_cmd_autostart_non_admin_prints_command(capsys):
+    """非管理员且 action=on 时打印手动命令，不调用 subprocess"""
+    args = SimpleNamespace(action="on")
+    with (
+        patch("src.commands._is_admin", return_value=False),
+        patch("subprocess.run") as mock_run,
+    ):
+        from src.commands import cmd_autostart
+
+        cmd_autostart(args)
+    out = capsys.readouterr().out
+    assert "需要管理员权限" in out
+    assert "register_task.ps1 -Mode startup" in out
+    mock_run.assert_not_called()
+
+
+def test_cmd_autostart_non_admin_off_prints_command(capsys):
+    """非管理员且 action=off 时同样打印手动命令"""
+    args = SimpleNamespace(action="off")
+    with (
+        patch("src.commands._is_admin", return_value=False),
+        patch("subprocess.run") as mock_run,
+    ):
+        from src.commands import cmd_autostart
+
+        cmd_autostart(args)
+    out = capsys.readouterr().out
+    assert "register_task.ps1 -Action unregister" in out
+    mock_run.assert_not_called()
+
+
+def test_cmd_autostart_status_no_admin_runs():
+    """status 普通用户可直接执行（不要求管理员）"""
+    args = SimpleNamespace(action="status")
+    with (
+        patch("src.commands._is_admin", return_value=False),
+        patch("subprocess.run") as mock_run,
+    ):
+        from src.commands import cmd_autostart
+
+        cmd_autostart(args)
+    mock_run.assert_called_once()
+    cmd = mock_run.call_args[0][0]
+    assert "register_task.ps1" in str(cmd)
+    assert "-Action" in str(cmd) and "status" in str(cmd)
+
+
+def test_cmd_autostart_admin_runs(capsys):
+    """管理员且 action=off 时直接调用 subprocess 卸载计划任务"""
+    args = SimpleNamespace(action="off")
+    with (
+        patch("src.commands._is_admin", return_value=True),
+        patch("subprocess.run") as mock_run,
+    ):
+        from src.commands import cmd_autostart
+
+        cmd_autostart(args)
+    out = capsys.readouterr().out
+    assert "需要管理员权限" not in out
+    mock_run.assert_called_once()
+    cmd = mock_run.call_args[0][0]
+    assert "-Action" in str(cmd) and "unregister" in str(cmd)
