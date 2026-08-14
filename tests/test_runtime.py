@@ -132,7 +132,7 @@ def test_import_manager_run_error(tmp_path):
     from src.zotero.manager import ZoteroImportManager
 
     zotero = MagicMock()
-    zotero.get_item.side_effect = RuntimeError("zotero down")
+    zotero.create_items = AsyncMock(side_effect=RuntimeError("zotero down"))
     mgr = ZoteroImportManager(zotero)
     job = {
         "id": "1",
@@ -146,7 +146,17 @@ def test_import_manager_run_error(tmp_path):
         "result": None,
         "error": None,
     }
-    with patch("src.db.PaperDB"):
+    with patch("src.db.PaperDB") as db_cls:
+        db = db_cls.return_value
+        db.get_paper.return_value = {
+            "source": "arxiv",
+            "source_id": "x",
+            "title": "Test Paper",
+            "authors": "",
+            "published": "",
+            "url": "",
+            "abstract": "",
+        }
         asyncio.run(mgr._run(job, [{"source": "arxiv", "source_id": "x"}]))
     assert job["status"] == "error"
     assert "zotero down" in job["error"]

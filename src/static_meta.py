@@ -38,13 +38,14 @@ def _default_app_meta() -> dict:
             "cs.CR",
             "stat.ML",
         ],
+        # 文案与已提交的 app/app-meta.json 保持一致（文件缺失/损坏时的回退须无感）
         "remark_labels": {
             "important": "⭐ 重要",
-            "useful": "👍 值得关注",
-            "browse": "📄 可浏览",
+            "useful": "👍 关注",
+            "browse": "📄 浏览",
             "skip": "🗑️ 跳过",
         },
-        "remark_colors": DEFAULT_REMARK_COLORS,
+        "remark_colors": dict(DEFAULT_REMARK_COLORS),  # 拷贝，防止调用方就地修改污染常量
         "section_labels": {
             "unmarked": "待审核",
             "marked": "已处理",

@@ -184,8 +184,7 @@ class TestPaperToZoteroItem:
         assert item["extra"] == "arXiv:1"
         assert "pdf_url" not in item["extra"]
 
-    def test_tags_only_sid(self):
-        """标签只保留 sid:{source}:{id}（用于反查/去重）"""
+    def test_no_sid_tag(self):
+        """导入去重已移除：不再写 sid 标签"""
         item = paper_to_zotero_item(_sample_paper())
-        tags = {t["tag"] for t in item["tags"]}
-        assert tags == {"sid:arxiv:2501.12345"}
+        assert "tags" not in item

@@ -61,7 +61,7 @@ async function init() {
         }
         var saved = null;
         try { saved = localStorage.getItem('pr-sort'); } catch (e) {}
-        if (saved && saved !== 'default') {
+        if (saved) {
             var sel = document.getElementById('sort-select');
             if (sel) { sel.value = saved; applySort(saved); }
         }
@@ -83,20 +83,27 @@ function applyMetaColors(colors) {
     });
 }
 
-/* 局部刷新：按当前日期范围重新拉取论文并重渲染 */
+/* 局部刷新：按当前日期范围重新拉取论文并重渲染。
+   请求序号 _loadSeq 防并发竞态：连续切换 range / 抓取完成同时到达时，
+   只认最后一次发起的请求，过期响应直接丢弃。 */
+var _loadSeq = 0;
 async function loadPapers() {
+    var seq = ++_loadSeq;
     try {
         var url = '/api/papers';
         if (state._currentRange && state._currentRange !== 'all') {
             url += '?range=' + encodeURIComponent(state._currentRange);
         }
         var res = await fetch(url);
-        state.papers = await res.json();
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var data = await res.json();
+        if (seq !== _loadSeq) return;  // 已有更新的加载，丢弃过期响应
+        state.papers = data;
         renderAll(state.papers);
         applyFilters();
         var saved = null;
         try { saved = localStorage.getItem('pr-sort'); } catch (e) {}
-        if (saved && saved !== 'default') applySort(saved);
+        if (saved) applySort(saved);
     } catch (e) {
         var list = document.getElementById('paper-list');
         if (list) list.innerHTML = '<div class="empty-state"><p><span class="empty-icon">⚠️</span>刷新失败: ' + escapeHtml(e.message) + '</p></div>';
@@ -215,6 +222,12 @@ function syncBatchChecks() {
     updateBatchBar();
 }
 
+/* 标题链接：只放行 http/https，阻止 javascript:/data: 等 scheme 构成的存储型 XSS */
+function safeUrl(u) {
+    var s = String(u == null ? '' : u);
+    return /^https?:\/\//i.test(s) ? s : '';
+}
+
 /* 构建单篇论文卡片。不可信字段（标题/作者/摘要/LLM 输出/URL 等）一律转义 */
 function buildPaperCard(p) {
     var meta = state.meta || {};
@@ -230,10 +243,10 @@ function buildPaperCard(p) {
     var tier = scoreTier(score);
     var userMark = p.user_mark || '';
     var markCls = userMark || 'unmarked';
-    /* 标题链接：直连 p.url / p.pdf_url（空值时纯文本，不做死链） */
-    var url = p.url || p.pdf_url || '';
+    /* 标题链接：直连 p.url / p.pdf_url（协议白名单外或空值时纯文本，不做死链） */
+    var url = safeUrl(p.url) || safeUrl(p.pdf_url) || '';
     var titleHtml = url
-        ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(p.title || '') + '</a>'
+        ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(p.title || '') + '</a>'
         : '<span>' + escapeHtml(p.title || '') + '</span>';
     var pct = Math.round(score * 100);
     var published = (p.published || '').slice(0, 10);  // YYYY-MM-DD
@@ -243,7 +256,7 @@ function buildPaperCard(p) {
 
     var html = '';
     html += '<div class="paper-card state-' + markCls + '" id="card-' + escapeHtml(cardKey) + '"';
-    html += ' data-remark="' + escapeHtml(remark) + '" data-mark="' + escapeHtml(userMark) + '"';
+    html += ' data-remark="' + escapeHtml(remark) + '"';
     html += ' data-score="' + escapeHtml(String(score)) + '" data-published="' + escapeHtml(published);
     html += '" data-fetch="' + escapeHtml(fetchDate) + '" data-suggest="' + escapeHtml(suggested) + '"';
     html += ' data-keyword="' + escapeHtml(p.keyword_match || '') + '">';
@@ -449,7 +462,7 @@ function toggleSection(name) {
 function escapeHtml(s) {
     return String(s == null ? '' : s)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 /* 转义用于内联 onclick 双引号属性内的 JS 单引号字符串，防注入：
@@ -546,13 +559,22 @@ async function openBatchImport() {
     renderBatchItems();
 }
 
+/* 输入框 oninput 回写状态：删除其它条目重渲染时，已手改的短标题/分类不丢失 */
+function onBatchFieldInput(key, field, val) {
+    if (_batchSelected[key]) _batchSelected[key][field] = val;
+}
+
 function renderBatchItems() {
     var itemsEl = document.getElementById('zb-items');
     var keys = Object.keys(_batchSelected);
     var html = '';
     keys.forEach(function (key, i) {
         var it = _batchSelected[key];
-        var suggestedColl = suggestCollection(it.keyword_match, _collectionsCache);
+        /* 短标题/分类优先取用户手改值（oninput 已回写状态），无则用建议值 */
+        var st = it.short_title != null ? it.short_title : (it.suggested_short_title || '');
+        var coll = it.collection_key != null
+            ? it.collection_key
+            : suggestCollection(it.keyword_match, _collectionsCache);
         html += '<div class="zb-item">';
         html += '<div class="zb-item-head">';
         /* 叉号：从选中列表移除该条，无需回列表重新找卡片取消勾选 */
@@ -560,8 +582,8 @@ function renderBatchItems() {
         html += '<div class="zb-item-title">[' + escapeHtml(it.source_id) + '] ' + escapeHtml(it.title || '') + '</div>';
         html += '</div>';
         html += '<div class="zb-item-row">';
-        html += '<input type="text" class="form-input" id="zb-st-' + i + '" value="' + escapeHtml(it.suggested_short_title || '') + '" placeholder="短标题">';
-        html += '<input type="text" class="form-input" list="zi-collections" id="zb-coll-' + i + '" value="' + escapeHtml(suggestedColl) + '" placeholder="分类（可选，支持 A / B / C）">';
+        html += '<input type="text" class="form-input" id="zb-st-' + i + '" value="' + escapeHtml(st) + '" placeholder="短标题" oninput="onBatchFieldInput(\'' + escapeJs(key) + '\', \'short_title\', this.value)">';
+        html += '<input type="text" class="form-input" list="zi-collections" id="zb-coll-' + i + '" value="' + escapeHtml(coll) + '" placeholder="分类（可选，支持 A / B / C）" oninput="onBatchFieldInput(\'' + escapeJs(key) + '\', \'collection_key\', this.value)">';
         html += '</div></div>';
     });
     itemsEl.innerHTML = html;
@@ -626,7 +648,8 @@ function hideImportBanner() {
     document.getElementById('import-banner').style.display = 'none';
 }
 
-/* 导入状态：先查一次 → 进行中则 SSE 等完成信号（无高频轮询） */
+/* 导入状态：先查一次 → 进行中则 SSE 等完成信号 + 30s 轮询兜底（防 SSE 断流后
+   永久停在"导入中"）；closed 标志防终态后重连/二次刷新。 */
 async function pollImportStatus() {
     var title = document.getElementById('import-banner-title');
     var logEl = document.getElementById('import-banner-log');
@@ -637,12 +660,20 @@ async function pollImportStatus() {
     _renderImportLog(title, logEl, job);
     if (job.status === 'done' || job.status === 'error') { await loadPapers(); return; }
 
-    /* 2) 进行中：SSE 等完成信号（断线自动重连一次） */
-    var retriedSse = false;
+    var closed = false;
+    function finish() {
+        if (closed) return;
+        closed = true;
+        loadPapers();
+    }
+
+    /* 2) 进行中：SSE 等完成信号（断线自动重连） */
     function watchSse() {
+        if (closed) return;
         var es;
         try { es = new EventSource('/api/import/events'); } catch (e) { return; }
         es.onmessage = async function (e) {
+            if (closed) { try { es.close(); } catch (err) {} return; }
             var evt;
             try { evt = JSON.parse(e.data); } catch (err) { return; }
             var latest = await _fetchImportJob();
@@ -653,16 +684,24 @@ async function pollImportStatus() {
             var done = evt.type === 'import-done' || evt.type === 'timeout' || evt.type === 'error';
             if (!done && latest) done = (latest.status === 'done' || latest.status === 'error');
             if (done) {
-                es.close();
-                await loadPapers();  /* 刷新：已处理区出现该论文 */
+                try { es.close(); } catch (err) {}
+                finish();
             }
         };
         es.onerror = function () {
             try { es.close(); } catch (err) {}
-            if (!retriedSse) { retriedSse = true; setTimeout(watchSse, 2000); }
+            if (!closed) setTimeout(watchSse, 2000);  /* 未终态则一直重连 */
         };
     }
     watchSse();
+
+    /* 3) 兜底：30s 查一次状态，SSE 断流/代理阻断时也能收尾 */
+    var pollTimer = setInterval(async function () {
+        if (closed) { clearInterval(pollTimer); return; }
+        var j = await _fetchImportJob();
+        if (j) _renderImportLog(title, logEl, j);
+        if (j && (j.status === 'done' || j.status === 'error')) finish();
+    }, 30000);
 }
 
 async function _fetchImportJob() {
@@ -697,8 +736,8 @@ function _renderImportLog(title, logEl, job) {
     if (ids.length) {
         ids.forEach(function (sid) {
             var st = itemsStatus[sid] || {};
-            var icon = st.item === 'imported' ? '✅' : st.item === 'skipped' ? '⏭️' : st.item === 'failed' ? '❌' : '⏳';
-            var txt = st.item === 'imported' ? '条目已导入' : st.item === 'skipped' ? '已在 Zotero，已标记处理' : st.item === 'failed' ? '导入失败' : '处理中';
+            var icon = st.item === 'imported' ? '✅' : st.item === 'failed' ? '❌' : '⏳';
+            var txt = st.item === 'imported' ? '条目已导入' : st.item === 'failed' ? '导入失败' : '处理中';
             html += '<div class="log-row">' + icon + ' <span class="log-time">' + escapeHtml(sid) + '</span> ' + txt + '</div>';
         });
     }

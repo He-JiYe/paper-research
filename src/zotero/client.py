@@ -15,7 +15,6 @@ from pyzotero import Zotero as PyzoteroClient
 from src.zotero.convert import collection_paths, paper_to_zotero_item, split_collection_path
 from src.zotero.utils import (
     MAX_BATCH_ITEMS,
-    TAG_SID,
     extract_key,
     extract_keys,
     is_collection_key,
@@ -52,17 +51,6 @@ class ZoteroClient:
         with self._lock:
             raw = self._client.everything(self._client.collections())
             return collection_paths(raw)
-
-    def get_item(self, source: str, source_id: str) -> dict | None:
-        """通过 ``sid:{source}:{id}`` 标签反查 Zotero 中的论文条目。
-
-        Returns:
-            Zotero item dict，未找到则返回 None。
-        """
-        with self._lock:
-            tag = TAG_SID.format(source=source, id=source_id)
-            items = self._client.items(tag=tag, limit=1)
-            return items[0] if items else None
 
     # ── 写原语 ─────────────────────────────────────────────
 

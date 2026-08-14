@@ -9,18 +9,17 @@ def db(tmp_path):
     return PaperDB(db_path=tmp_path / "papers.db")
 
 
-def _add(db, source_id, remark="important", kw="RL"):
+def _add(db, source_id, remark="important", kw="RL", fetch_date="2026-08-01"):
     db.add_papers(
         [
             {
                 "source": "arxiv",
                 "source_id": source_id,
                 "title": f"Paper {source_id}",
-                "status": "summarized",
                 "llm_remark": remark,
                 "llm_score": 0.8,
                 "keyword_match": kw,
-                "fetch_date": "2026-08-01",
+                "fetch_date": fetch_date,
             }
         ]
     )
@@ -107,3 +106,30 @@ def test_update_mark_pending_resets(db):
     assert paper["user_mark"] is None
     assert paper["zotero_key"] == ""  # 离开 imported 即清空
     assert paper["short_title"] == ""  # 离开 imported 即清空
+
+
+def test_fetch_date_from_filters_all_queries(db):
+    """fetch_date_from 起始日过滤：pending/marked/lurk/stats 四路同时生效。"""
+    _add(db, "old1", fetch_date="2026-08-01")
+    _add(db, "old2", fetch_date="2026-08-01")
+    _add(db, "new1", fetch_date="2026-08-05")
+    _add(db, "new2", fetch_date="2026-08-05")
+    db.update_mark("arxiv", "old2", "ignore")
+    db.update_mark("arxiv", "new2", "lurk")
+    since = "2026-08-02"  # 只保留 08-02 及之后抓取的
+
+    pending = db.get_pending(since)
+    marked = db.get_marked(since)
+    lurk = db.get_lurk(since)
+    assert {p["source_id"] for p in pending} == {"new1"}
+    assert {p["source_id"] for p in marked} == set()
+    assert {p["source_id"] for p in lurk} == {"new2"}
+    stats = db.get_stats(since)
+    assert stats["total"] == 2
+    assert stats["pending"] == 1
+
+    # 不过滤时四路均可见
+    assert len(db.get_pending()) == 2
+    assert len(db.get_marked()) == 1
+    assert len(db.get_lurk()) == 1
+    assert db.get_stats()["total"] == 4

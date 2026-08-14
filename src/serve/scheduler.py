@@ -38,7 +38,7 @@ class FetchScheduler:
 
         # 启动补抓：笔记本/台式机场景下，开机时间可能晚于 fetch_time。
         # 补抓即补今日抓取，抓取后同样发今日邮件。
-        if self.catch_up_on_start and self._should_catch_up():
+        if self.catch_up_on_start and await self._should_catch_up():
             logger.info("今日抓取尚未执行且已过计划时间，启动补抓（发今日邮件）")
             await self._run_fetch()
 
@@ -50,22 +50,25 @@ class FetchScheduler:
             await asyncio.sleep(wait_seconds)
             # fetch_time 之后已成功抓取过（如用户在页面手动抓取）则跳过，
             # 避免重复抓取以及由此带来的重复邮件
-            if self._fetched_since_fetch_time():
+            if await self._fetched_since_fetch_time():
                 logger.info("今日 fetch_time 后已有成功抓取记录，跳过本次定时抓取")
                 continue
             await self._run_fetch()
 
-    def _fetched_since_fetch_time(self) -> bool:
-        """今天 fetch_time 之后是否已有成功抓取记录（含手动抓取）。
+    async def _fetched_since_fetch_time(self) -> bool:
+        """今天 fetch_time 之后（含）是否已有成功抓取记录（含手动抓取）。
 
         fetch_time 之前的手动抓取不算——否则会抑制 fetch_time 的定时/补抓。
         直接拿 ``run_time`` 与「今日 fetch_time」比较（fetch_time 已由配置校验为 HH:MM）。
+        SQLite 读（PaperDB 构造含建表 DDL）放线程执行，不阻塞 serve 事件循环。
         """
         try:
             from src.db import PaperDB
 
             today = self._now().date().isoformat()
-            return PaperDB().has_successful_since(f"{today} {self.fetch_time}:00")
+            return await asyncio.to_thread(
+                PaperDB().has_successful_since, f"{today} {self.fetch_time}:00"
+            )
         except Exception as e:
             logger.warning("抓取记录检查失败（按未抓取处理）: %s", e)
             return False
@@ -79,14 +82,14 @@ class FetchScheduler:
         hour, minute = map(int, self.fetch_time.split(":"))
         return hour, minute
 
-    def _should_catch_up(self) -> bool:
+    async def _should_catch_up(self) -> bool:
         """判断是否需要补抓：今天已过计划时间 且 今天 fetch_time 之后没有成功抓取记录。"""
         now = self._now()
         hour, minute = self._parse_fetch_time()
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if now < target:
             return False  # 今天还没到点，正常等待即可
-        return not self._fetched_since_fetch_time()
+        return not await self._fetched_since_fetch_time()
 
     def _next_run(self, now: datetime) -> datetime:
         hour, minute = self._parse_fetch_time()

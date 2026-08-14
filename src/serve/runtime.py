@@ -1,7 +1,8 @@
-"""serve 运行时上下文：可注入对象，取代旧的模块级全局 state。
+"""serve 运行时上下文：可注入对象，取代旧的跨模块 import 的全局 state。
 
-- 由 ``serve.__init__`` 的 lifespan/run_server 构造并挂到 ``app.state.runtime``；
-- 路由经 ``request.app.state.runtime`` 访问（显式依赖注入，无全局单例）；
+- 由 ``serve.__init__`` 构造并挂到 ``app.state.runtime``（进程级唯一实例，
+  但各模块不直接 import 它）；
+- 路由经 ``request.app.state.runtime`` 访问（显式依赖注入）；
 - 提供轻量 SSE 事件流（import/events）：导入任务完成后由后端推送完成信号，
   前端无需高频轮询（批量导入完成后即刻刷新）。
 """

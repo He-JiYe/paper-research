@@ -65,12 +65,18 @@ def _render_paper_row(p: dict, colors: dict[str, str]) -> str:
     remark = p.get("llm_remark", "")
     return _render(
         "paper_row.html",
-        url=_escape(p.get("url", "#")),
+        url=_escape(_safe_url(p.get("url", ""))),
         title=_escape(p.get("title", "")[:_TITLE_MAX]),  # 先截断再转义，避免切断 HTML 实体
         remark=_escape(remark),
         color=_escape(colors.get(remark, DEFAULT_REMARK_COLORS["skip"])),
         score=_fmt_score(p.get("llm_score")),
     )
+
+
+def _safe_url(url) -> str:
+    """URL scheme 白名单（http/https），其余回退锚点（防 javascript: 等注入）。"""
+    s = str(url or "")
+    return s if s.startswith(("http://", "https://")) else "#"
 
 
 def render_email_report(
@@ -109,7 +115,7 @@ def render_email_report(
     section_labels = meta.get("section_labels", {})
     labels = {
         "important": remark_labels.get("important", "重要"),
-        "useful": remark_labels.get("useful", "值得关注"),
+        "useful": remark_labels.get("useful", "关注"),
         "pending": section_labels.get("unmarked", "待审核"),
         "total": "总计",
     }

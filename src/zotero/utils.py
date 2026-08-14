@@ -1,4 +1,4 @@
-"""Zotero 辅助函数：标签前缀、collection 引用解析、响应 key 提取。
+"""Zotero 辅助函数：collection 引用解析、响应 key 提取。
 
 client 只负责与 Zotero 交互；本模块提供纯函数辅助（无 I/O、无 Zotero 连接）。
 
@@ -11,10 +11,6 @@ import re
 
 # 单次批量创建/导入条数上限（Zotero API 批量创建限制，client 与接口层共用）
 MAX_BATCH_ITEMS = 50
-
-# ─── 标签前缀 ───────────────────────────────────────────────
-
-TAG_SID = "sid:{source}:{id}"  # 通用 source_id 标签
 
 
 # ─── collection 引用解析 ────────────────────────────────────
@@ -59,8 +55,4 @@ def extract_keys(response: object, n: int, what: str = "item") -> list[str | Non
             failed = response.get("failed", {})
             raise RuntimeError(f"Zotero 创建{what}被拒绝: {failed or response}")
         return keys
-    if isinstance(response, list):
-        keys = [r.get("key", "") for r in response if isinstance(r, dict)]
-        if len(keys) == n and all(keys):
-            return keys
     raise RuntimeError(f"无法解析创建{what}响应: {response!r}")

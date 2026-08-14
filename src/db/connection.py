@@ -16,6 +16,10 @@ _SQLITE_TIMEOUT = 10  # SQLite 连接/写锁等待超时（秒）
 # 统一用模块级锁，跨实例串行写。
 _WRITE_LOCK = threading.Lock()
 
+# 本进程已完成建表的 DB 路径集合：PaperDB 是每请求/每操作热路径构造，
+# 同一路径第二次起跳过全量 DDL（SQLite DDL 幂等，跨进程首建由 CREATE IF NOT EXISTS 兜底）。
+_INITIALIZED_PATHS: set[str] = set()
+
 
 class ConnectionMixin:
     """连接管理 + 表结构初始化（WAL + 每次操作独立连接 + 模块级写锁）。"""
@@ -29,8 +33,12 @@ class ConnectionMixin:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self._path), timeout=_SQLITE_TIMEOUT)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            # WAL 已持久化于 DB 文件，此处冗余执行仅兜底旧库/损坏重建；PRAGMA 抛错时关闭连接防泄漏
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            conn.close()
+            raise
         return conn
 
     @staticmethod
@@ -40,10 +48,20 @@ class ConnectionMixin:
         return dict(row)
 
     def _init_db(self):
-        """创建表结构（幂等；持模块级写锁，避免并发首次构造时的 DDL 写竞争）。"""
+        """创建表结构（幂等；持模块级写锁，避免并发首次构造时的 DDL 写竞争）。
+
+        同一路径第二次构造起跳过（_INITIALIZED_PATHS 缓存），避免热路径每次
+        实例化都全量跑一遍 DDL 并占用全局写锁。
+        """
+        key = str(self._path.resolve())
+        if key in _INITIALIZED_PATHS:
+            return
         with self._lock:
+            if key in _INITIALIZED_PATHS:  # 等锁期间可能已被其他实例初始化
+                return
             conn = self._get_conn()
             try:
                 conn.executescript(PAPERS_SCHEMA_SQL + "\n" + FETCH_LOGS_SCHEMA_SQL)
             finally:
                 conn.close()
+            _INITIALIZED_PATHS.add(key)

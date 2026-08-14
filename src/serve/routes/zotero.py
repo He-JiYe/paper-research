@@ -41,6 +41,9 @@ async def api_zotero_import_batch(request: Request, data: dict):
         raise HTTPException(status_code=400, detail="items 元素必须是对象")
     if len(items) > MAX_BATCH_ITEMS:
         raise HTTPException(status_code=400, detail=f"一次最多导入 {MAX_BATCH_ITEMS} 条")
+    # 必备字段前置校验：缺失时直接 400，而不是「提交成功、任务必败」
+    if any(not it.get("source") or not it.get("source_id") for it in items):
+        raise HTTPException(status_code=400, detail="items 元素必须包含非空 source 和 source_id")
 
     job = manager.submit(items)
     if job is None:

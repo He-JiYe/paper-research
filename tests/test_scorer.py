@@ -250,8 +250,9 @@ async def test_score_async_no_api_key_uses_fallback(monkeypatch):
     assert isinstance(result, LLMResult)
 
 
-def test_score_batch_async_empty():
+def test_score_batch_async_empty(monkeypatch):
     """空论文列表 → 空结果"""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)  # 防本机环境变量触发真实联网
     result = asyncio.run(PaperScorer(_provider()).score_batch_async([]))
     assert result == []
 
@@ -290,7 +291,7 @@ def test_score_source_connection_failure():
 
 def test_score_source_connection_failure_on_call_none():
     """_call 返回 None（provider 调用失败）→ fallback，source=connection_failed"""
-    scorer = _ready_scorer(api_key="sk-test")
+    scorer = _ready_scorer(api_key="sk-test", max_retries=0)  # 0 重试：免重试等待
     with patch.object(scorer, "_call", return_value=None):
         result = scorer.score("T", "A", keyword="kw")
     assert result.source == ScoreSource.FALLBACK_CONNECTION
@@ -303,9 +304,11 @@ def test_from_settings_builds_provider():
     from src.core.config import LLMConfig
 
     settings = SimpleNamespace(llm=LLMConfig(api_key="sk-test"))
-    scorer = PaperScorer.from_settings(settings)
+    # patch 掉初始化探测：真实 _check_llm 会对 api_base 发起网络请求（离线确定性）
+    with patch.object(PaperScorer, "_check_llm", return_value=(False, ScoreSource.FALLBACK_NO_KEY)):
+        scorer = PaperScorer.from_settings(settings)
     assert scorer._provider is not None
-    assert scorer._llm_ready is False  # 无 key → 走 fallback（真实 _check_llm 不联网）
+    assert scorer._llm_ready is False  # 探测结果由 patch 提供（无 key → fallback）
 
 
 def test_from_settings_wires_max_concurrent():
@@ -320,8 +323,9 @@ def test_from_settings_wires_max_concurrent():
     assert scorer.max_concurrent == 2
 
 
-def test_score_batch_async_uses_instance_max_concurrent():
+def test_score_batch_async_uses_instance_max_concurrent(monkeypatch):
     """未显式传 max_concurrent 时用实例值（构造注入），Semaphore 按该值创建"""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)  # 防本机环境变量触发真实联网
     real_sem = asyncio.Semaphore  # 捕获真实类，避免 patch 作用域内自递归
     captured = {}
 

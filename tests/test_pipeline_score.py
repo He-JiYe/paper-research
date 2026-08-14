@@ -31,7 +31,7 @@ def test_score_rows_empty():
     assert rows == []
 
 
-def test_score_rows_writes_fields_and_status():
+def test_score_rows_writes_fields():
     scorer = _scorer([_llm_result()])
     rows = [{"title": "T", "abstract": "A"}]
     count, out = asyncio.run(score_rows(scorer, rows))
@@ -39,7 +39,6 @@ def test_score_rows_writes_fields_and_status():
     assert out[0]["llm_remark"] == "useful"
     assert out[0]["llm_score"] == 0.8
     assert out[0]["score_source"] == "llm"
-    assert out[0]["status"] == "summarized"
 
 
 def test_score_rows_async_exception_propagates():

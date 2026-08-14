@@ -7,7 +7,7 @@ import json
 
 from src.config.settings import now_str, today_str
 from src.db.connection import ConnectionMixin
-from src.db.enums import PENDING_WHERE, PaperStatus, UserMark, fetch_date_clause
+from src.db.enums import PENDING_WHERE, UserMark, fetch_date_clause
 
 
 def _to_json(value) -> str:
@@ -34,8 +34,8 @@ class PaperCrudMixin(ConnectionMixin):
                     (source, source_id, title, authors, abstract, url, pdf_url,
                      categories, published, updated, keyword_match, raw_data,
                      llm_summary, llm_remark, llm_reason, llm_score, score_source,
-                     status, fetch_date)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     fetch_date)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         p.get("source", ""),
                         p.get("source_id", ""),
@@ -54,7 +54,6 @@ class PaperCrudMixin(ConnectionMixin):
                         p.get("llm_reason", ""),
                         p.get("llm_score", 0.0),
                         p.get("score_source", ""),
-                        p.get("status", PaperStatus.SUMMARIZED.value),
                         p.get("fetch_date", today),
                     ),
                 )
@@ -97,12 +96,14 @@ class PaperCrudMixin(ConnectionMixin):
             conn.close()
 
     def _query(self, where: str, order_by: str, params: list) -> list[dict]:
-        """按 WHERE/ORDER 查询论文表（get_pending/get_marked/get_lurk 共用）。"""
+        """按 WHERE/ORDER 查询论文表（get_pending/get_marked/get_lurk 共用）。
+
+        契约：``where``/``order_by`` 必须是模块内硬编码 SQL 片段，**禁止插入任何
+        运行时值**（用户可控值一律走 ``params`` 占位符），否则构成注入面。
+        """
         conn = self._get_conn()
         try:
-            cur = conn.execute(
-                f"SELECT * FROM papers WHERE {where}{order_by}", params
-            )
+            cur = conn.execute(f"SELECT * FROM papers WHERE {where}{order_by}", params)
             return [dict(row) for row in cur.fetchall()]
         finally:
             conn.close()
@@ -121,7 +122,7 @@ class PaperCrudMixin(ConnectionMixin):
         clause, params = fetch_date_clause(fetch_date_from)
         return self._query(
             f"user_mark IN (?, ?){clause}",
-            " ORDER BY marked_date DESC",
+            " ORDER BY marked_date DESC, rowid DESC",
             [UserMark.IGNORE.value, UserMark.IMPORTED.value, *params],
         )
 
@@ -130,7 +131,7 @@ class PaperCrudMixin(ConnectionMixin):
         clause, params = fetch_date_clause(fetch_date_from)
         return self._query(
             f"user_mark = ?{clause}",
-            " ORDER BY marked_date DESC",
+            " ORDER BY marked_date DESC, rowid DESC",
             [UserMark.LURK.value, *params],
         )
 
@@ -151,23 +152,19 @@ class PaperCrudMixin(ConnectionMixin):
         - 其余任何非 imported 标记（ignore/lurk/pending）：恢复刚入库时的形态，
           即 short_title / zotero_key 一律清空（不残留旧导入关联）。
 
-        pending 清空 zotero_key 不影响重新导入去重：manager 直接查 Zotero 的
-        sid 标签，不依赖本地列。
+        论文状态由 user_mark 单一推导：NULL=待审阅（get_pending），
+        ignore/lurk/imported 分别为已忽略/延后/已导入（get_marked/get_lurk）。
         """
-        now = now_str()  # 与 created_at/updated_at 默认、fetch_logs.run_time 同格式（%Y-%m-%d %H:%M:%S）
+        now = (
+            now_str()
+        )  # 与 created_at/updated_at 默认、fetch_logs.run_time 同格式（%Y-%m-%d %H:%M:%S）
 
         if mark_type == UserMark.IMPORTED.value:
-            user_mark, status = mark_type, PaperStatus.REVIEWED.value
-            marked_date, st, zk = now, short_title, zotero_key
-        elif mark_type == UserMark.LURK.value:
-            user_mark, status = mark_type, PaperStatus.REVIEWED.value
-            marked_date, st, zk = now, "", ""
-        elif mark_type == UserMark.IGNORE.value:
-            user_mark, status = mark_type, PaperStatus.IGNORED.value
-            marked_date, st, zk = now, "", ""
+            user_mark, marked_date, st, zk = mark_type, now, short_title, zotero_key
+        elif mark_type in (UserMark.LURK.value, UserMark.IGNORE.value):
+            user_mark, marked_date, st, zk = mark_type, now, "", ""
         elif mark_type == UserMark.PENDING.value:
-            user_mark, status = None, PaperStatus.SUMMARIZED.value
-            marked_date, st, zk = None, "", ""
+            user_mark, marked_date, st, zk = None, None, "", ""
         else:
             raise ValueError(f"未知 mark_type: {mark_type!r}")
 
@@ -176,11 +173,11 @@ class PaperCrudMixin(ConnectionMixin):
             try:
                 conn.execute(
                     """UPDATE papers SET
-                        user_mark = ?, status = ?,
+                        user_mark = ?,
                         short_title = ?, zotero_key = ?,
                         marked_date = ?, updated_at = ?
                     WHERE source = ? AND source_id = ?""",
-                    (user_mark, status, st, zk, marked_date, now, source, source_id),
+                    (user_mark, st, zk, marked_date, now, source, source_id),
                 )
                 conn.commit()
             finally:

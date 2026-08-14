@@ -74,6 +74,7 @@ def test_redirect_stdio_when_attached(tmp_path):
 
 def test_console_handler_only_on_tty(tmp_path, monkeypatch):
     """console handler 仅在真实交互终端（isatty）挂载，无控制台启动不重复写日志。"""
+
     class _FakeStream:
         def __init__(self, tty):
             self._tty = tty

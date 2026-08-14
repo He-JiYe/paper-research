@@ -27,5 +27,7 @@ class LLMResult:
     remark: str  # important / useful / browse / skip
     reason: str
     score: float
-    score_distribution: dict[str, float] | None = None  # 概率分布 {0: p0, 1: p1, ..., 5: p5}
+    # 概率分布 {0: p0, 1: p1, ..., 5: p5}：仅供 parse 推导期望 score 用，不落库、
+    # 无下游消费（pipeline.score 写库只取 summary/remark/reason/score/source）
+    score_distribution: dict[str, float] | None = None
     source: ScoreSource = ScoreSource.LLM  # 评分来源（LLM judge 或 fallback 原因）

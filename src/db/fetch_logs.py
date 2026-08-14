@@ -61,7 +61,7 @@ class LogCrudMixin(ConnectionMixin):
             conn.close()
 
     def has_successful_since(self, since: str) -> bool:
-        """``since``（YYYY-MM-DD HH:MM:SS）之后是否已有成功抓取记录（补抓判定）。
+        """``since``（YYYY-MM-DD HH:MM:SS）**及之后（含等于）**是否已有成功抓取记录。
 
         直接按 ``run_time`` 字符串比较，无需日期上界——since 取「今日 fetch_time」时，
         早于 fetch_time 的记录（含昨天）自然 ``run_time < since``。
@@ -110,16 +110,40 @@ class LogCrudMixin(ConnectionMixin):
             run_time: 系统本地时间戳（YYYY-MM-DD HH:MM:SS），保证
                 ``has_successful_since`` 的补抓判定与存储口径一致；为空用 SQLite 本地默认。
         """
-        cols = "(keywords_used, papers_fetched, papers_new, papers_summarized, status, error_msg)"
-        vals = (keywords_used, papers_fetched, papers_new, papers_summarized, status, error_msg)
-        if run_time:
-            cols = f"(run_time, {cols.lstrip('(')}"
-            vals = (run_time, *vals)
-        placeholders = ", ".join("?" * len(vals))
         with self._lock:
             conn = self._get_conn()
             try:
-                conn.execute(f"INSERT INTO fetch_logs {cols} VALUES ({placeholders})", vals)
+                if run_time:
+                    conn.execute(
+                        """INSERT INTO fetch_logs
+                        (run_time, keywords_used, papers_fetched, papers_new,
+                         papers_summarized, status, error_msg)
+                        VALUES (?,?,?,?,?,?,?)""",
+                        (
+                            run_time,
+                            keywords_used,
+                            papers_fetched,
+                            papers_new,
+                            papers_summarized,
+                            status,
+                            error_msg,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO fetch_logs
+                        (keywords_used, papers_fetched, papers_new,
+                         papers_summarized, status, error_msg)
+                        VALUES (?,?,?,?,?,?)""",
+                        (
+                            keywords_used,
+                            papers_fetched,
+                            papers_new,
+                            papers_summarized,
+                            status,
+                            error_msg,
+                        ),
+                    )
                 conn.commit()
             finally:
                 conn.close()

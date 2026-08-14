@@ -1,9 +1,9 @@
 """Zotero 导入任务管理器：后台单飞 + 日志（批量统一入口）。
 
 - 一次只允许一个导入任务（busy 期间新提交返回 None，接口层回 409）；
-- 前端选定 db 内 record：读取论文 → 去重（sid 已在 Zotero / 已在该 collection 则跳过）→
-  一次 ``create_items`` 批量创建（逐篇独立 collection）；
-- 每篇创建后立即 ``update_mark('imported')``；已在 Zotero 的也标记 imported（移入已处理）；
+- 前端选定 db 内 record：读取论文 → 一次 ``create_items`` 批量创建（逐篇独立 collection）；
+  导入不做去重，重复导入同一 item 会创建新条目；
+- 每篇创建后立即 ``update_mark('imported')``；
 - 每步写入 job.log + items_status；任务完成经 on_done → SSE 推送完成信号。
 
 不再提供 PDF 附件功能：本机 Zotero connector（localhost:23119/api）只支持读取、
@@ -45,7 +45,7 @@ class ZoteroImportManager:
             "status": "running",
             "step": "排队中",
             "log": [],
-            "items_status": {},  # {"source:source_id": {"item": imported|skipped}}（合成 key 防跨源碰撞）
+            "items_status": {},  # {"source:source_id": {"item": imported|failed}}（合成 key 防跨源碰撞）
             "started_at": datetime.now().isoformat(),
             "finished_at": None,
             "result": None,
@@ -78,13 +78,18 @@ class ZoteroImportManager:
             except Exception:
                 logger.warning("预拉 Zotero 分类失败，改用逐篇 find-or-create")
 
-            # ── 1. 读 db records + 去重（sid 已在 Zotero 一律跳过，不重复创建）──
-            papers, short_titles, collection_keys, metas, results = await self._collect_pending(
+            # ── 1. 读 db records + 组装批量创建参数（不做去重）──
+            papers, short_titles, collection_keys, metas = await self._collect_pending(
                 job, items, db
             )
+            results: list[dict] = []
 
             # ── 2. 一次批量 create_items（逐篇独立 collection，分类已解析为 key）──
             job["step"] = f"批量创建 {len(papers)} 条"
+            # 预解析路径→key：create_items 内部还会对每个 ck 再跑一次 ensure_collection，
+            # 但已是 key 会 is_collection_key 短路（无 I/O），故这里预解析负责实际的
+            # find-or-create I/O（共享 collection_map，避免每篇重复全量拉取），
+            # create_items 那遍是廉价的空转兜底，两处并存属有意为之。
             resolved_colls = [
                 await asyncio.to_thread(z.ensure_collection, ck, path_to_key=collection_map)
                 for ck in collection_keys
@@ -139,14 +144,12 @@ class ZoteroImportManager:
 
     async def _collect_pending(
         self, job: dict, items: list[dict], db
-    ) -> tuple[list, list, list, list, list]:
-        """读 db records + 去重：已在 Zotero 的一律跳过并标记 imported。
+    ) -> tuple[list, list, list, list]:
+        """读 db records + 组装批量创建参数（导入不去重：重复导入会创建新条目）。
 
-        返回 ``(papers, short_titles, collection_keys, metas, skipped_results)``——
-        前四项用于批量创建，skipped_results 记录已存在被跳过的项。
+        返回 ``(papers, short_titles, collection_keys, metas)`` 四项，用于批量创建。
         """
         papers, short_titles, collection_keys, metas = [], [], [], []
-        results: list[dict] = []
         for idx, item in enumerate(items):
             job["step"] = f"检查 {idx + 1}/{len(items)}"
             source = item.get("source", "")
@@ -158,25 +161,11 @@ class ZoteroImportManager:
             if not paper:
                 raise ValueError(f"论文不存在于数据库: {source}:{source_id}")
 
-            existing = await asyncio.to_thread(self._zotero.get_item, source, source_id)
-            if existing:
-                key = existing["data"]["key"]
-                # 已在 Zotero：不重复创建（含归档到新分类），把 web 端标记为已处理
-                self._log(job, "info", f"{source}:{source_id} 已在 Zotero，标记为已处理")
-                db.update_mark(
-                    source, source_id, "imported", short_title=short_title, zotero_key=key
-                )
-                job["items_status"][f"{source}:{source_id}"] = {"item": "skipped"}
-                results.append(
-                    {"source": source, "source_id": source_id, "zotero_key": key, "created": False}
-                )
-                continue
-
             papers.append(paper)
-            short_titles.append(short_title or suggest_short_title(paper, prefix=""))
+            short_titles.append(short_title or suggest_short_title(paper))
             collection_keys.append(collection_key)
             metas.append({"source": source, "source_id": source_id, "paper": paper})
-        return papers, short_titles, collection_keys, metas, results
+        return papers, short_titles, collection_keys, metas
 
     def _emit(self, type_: str, job: dict) -> None:
         """推送终态/完成事件（on_done → SSE）。"""

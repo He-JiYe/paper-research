@@ -111,10 +111,10 @@ class BaseSource(ABC, Generic[RawResult]):
             records = await self.adapt(results)
             for r in records:
                 r.keyword_match = keyword
-            logger.info("[%s]: %s 篇", keyword, len(results))
+            logger.info("[%s]: %s 篇", keyword, len(records))
             return records
         except Exception as e:
-            logger.warning("关键词 [%s] 抓取失败: %s", keyword, e)
+            logger.exception("关键词 [%s] 抓取失败: %s", keyword, e)  # 带完整栈，便于定位真实 bug
             return []
 
     # ── 批量抓取（模板方法）────────────────────────────────────────

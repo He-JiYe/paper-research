@@ -16,9 +16,9 @@ serve（FastAPI）监听 `127.0.0.1:8899`（config.yaml `server.port`），前�
 | 1 | `GET /api/papers` | `?range=all\|today\|7d\|30d`（默认 all，非法值 400） | `{update_time, range, stats, sections:{unmarked,marked,lurk}}` | `payloads.build_papers_payload(db, range, today)` | `app.js` init / loadPapers / applyRange |
 | 2 | `GET /api/static` | — | `{categories, remark_labels, remark_colors, section_labels}` | `static_meta.load_app_meta`（app/app-meta.json） | `app.js` init |
 | 3 | `GET /api/fetch/status` | — | `{last_success, papers_new}`（无成功记录时 last_success=None） | `db.get_last_success` | `app.js` startAutoRefresh（连接/重连时单次检查 + 60s 轮询兜底） |
-| 4 | `POST /mark` | form：`source`/`source_id`/`mark_type`(ignore\|lurk\|pending)/`short_title`(可省，前端不发送) | `{status, source, source_id, mark_type}` | `db.update_mark` | `app.js` markPaper |
+| 4 | `POST /mark` | form：`source`/`source_id`/`mark_type`(ignore\|lurk\|pending)；Origin 头存在时必须为本机回环（127.0.0.1/localhost/::1），否则 403（防跨源 form POST 的 CSRF） | `{status, source, source_id, mark_type}` | `db.update_mark` | `app.js` markPaper |
 | 5 | `GET /api/zotero/collections` | — | `{collections:[{name,key,path,depth,parentCollection}]}` | `ZoteroClient.list_collections` | `app.js` openBatchImport |
-| 6 | `POST /api/zotero/import-batch` | JSON：`{items:[{source,source_id,short_title,collection_key}]}`（items 须为列表，非法 400） | `{status:"submitted", job_id, busy:true, items:<提交条数>}`；busy 409 | `ZoteroImportManager.submit`（批量，单篇是其特例） | `app.js` confirmBatchImport |
+| 6 | `POST /api/zotero/import-batch` | JSON：`{items:[{source,source_id,short_title,collection_key}]}`（items 须为列表，非法 400） | `{status:"submitted", job_id, busy:true, items:<提交条数>}`；busy 409 | `ZoteroImportManager.submit`（批量，单篇是其特例；不做去重，重复导入同一 item 会创建新条目） | `app.js` confirmBatchImport |
 | 7 | `GET /api/zotero/import/status` | — | `{busy, job:{id,step,log[],items_status,status,result,error,...}}` | `ZoteroImportManager.status` | `app.js` pollImportStatus |
 | 8 | `GET /api/import/events` | SSE（`text/event-stream`） | 连接即推当前状态；完成推 `import-done`/`error`；期间 15s 心跳注释行；2h 整体超时 | `runtime.sse_event_stream` / `ZoteroImportManager` on_done | `app.js` pollImportStatus |
 | 9 | `GET /api/fetch/events` | SSE（`text/event-stream`） | 调度器抓取完成时推 `fetch-done`；期间 15s 心跳注释行；2h 整体超时 | `runtime.sse_event_stream` / `FetchScheduler` on_fetch_done | `app.js` startAutoRefresh |
@@ -33,7 +33,10 @@ serve（FastAPI）监听 `127.0.0.1:8899`（config.yaml `server.port`），前�
 
 `source, source_id, title, authors, abstract, url, pdf_url, categories, published, updated,
 keyword_match, raw_data(JSON), llm_summary, llm_remark, llm_reason, llm_score, score_source,
-user_mark, short_title, zotero_key, status, fetch_date, marked_date`
+user_mark, short_title, zotero_key, fetch_date, marked_date`
+
+（冗余的 `status` 列已删除：论文状态由 `user_mark` 单一推导——NULL=待审阅，
+ignore/lurk/imported 分别为已忽略/延后/已导入。）
 
 前端额外消费：无 `short_title` 的论文由 `build_papers_payload` 注入 `suggested_short_title`（回填短标题输入框）。
 
@@ -63,3 +66,5 @@ user_mark, short_title, zotero_key, status, fetch_date, marked_date`
   导入完成信号，前端订阅即收，无需高频轮询。
 - **变化**：`/api/papers` 新增 `range` 参数（日期范围筛选），返回 `{update_time, range, stats, sections}`；
   「今日」按系统本地时间计算（与邮件今日过滤、调度判重同一口径，见 `config.settings.today_str`）。
+- **移除**：Zotero 批量导入去重（不再按 `sid:{source}:{id}` 标签反查 Zotero 跳过已存在条目）；
+  重复导入同一 item 会创建新条目。

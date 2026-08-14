@@ -62,9 +62,9 @@ src/
 │   ├── loader.py        # config.yaml 读写 + ${ENV} 解析 + Pydantic 构建 + options 动态解析
 │   └── settings.py      # get_active_keywords 等派生助手
 ├── db/                  # SQLite 层
-│   ├── enums.py         # PaperStatus/UserMark/FetchLogStatus + PENDING_WHERE（单一来源）
+│   ├── enums.py         # UserMark/FetchLogStatus + PENDING_WHERE（单一来源；status 冗余列已删）
 │   ├── schema.py        # 建表 SQL（+score_source、fetch_date 索引）
-│   ├── connection.py    # 连接管理（WAL + 写锁）
+│   ├── connection.py    # 连接管理（WAL + 模块级写锁）
 │   ├── papers.py        # 论文 CRUD（get_pending(fetch_date_from=) 等）
 │   └── fetch_logs.py    # 统计 + 日志（has_successful_since 补抓判定）
 ├── network/             # 数据源抽象 + 注册表
@@ -86,7 +86,7 @@ src/
 │   └── report.py        # send_fetch_report 统一入口（只通知今日）
 ├── serve/               # FastAPI
 │   ├── __init__.py      # app 工厂 + lifespan + run_server（注入 app.state.runtime）
-│   ├── runtime.py       # Runtime 可注入上下文（settings/zotero/scheduler，无全局单例）
+│   ├── runtime.py       # Runtime 可注入上下文（settings/zotero/scheduler，经 request.app.state.runtime 显式注入）
 │   ├── payloads.py      # /api/papers 载荷（range 过滤 + 建议短标题）
 │   ├── scheduler.py     # FetchScheduler（每日定时 + 补抓；补抓=正式今日抓取发邮件）
 │   └── routes/          # papers.py（papers/static/fetch-status/fetch-events/mark）+ zotero.py（导入闭环）
@@ -94,7 +94,7 @@ src/
     ├── client.py        # ZoteroClient（pyzotero 封装；ensure_collection 公开）
     ├── convert.py       # paper→item / collection 路径解析（split_collection_path 单一来源）
     ├── manager.py       # ZoteroImportManager（单飞批量导入）
-    └── utils.py         # 标签/Extra 编解码/响应 key
+    └── utils.py         # collection 引用解析 + 响应 key 提取
 ```
 
 ## CLI 命令
@@ -131,8 +131,11 @@ config.yaml → config/loader (Pydantic) ──→ network (REGISTRY.sources/opt
 
 ## 核心设计约定
 
-- **短标题单一来源**：`core.text.suggest_short_title(paper, *, keyword, prefix)`。
-  Web 回填 `未读-{关键词}-{年份}-{缩写}`，Zotero 兜底 `{关键词或Unknown}-{年份}-{缩写}`。
+- **短标题单一来源**：`core.text.suggest_short_title(paper)`。
+  Web 回填与 Zotero 兜底共用：`raw_data.comment` 非空 → `{comment}-{缩写}`，
+  否则 `{source}-{updated年份}-{缩写}`（source 为空用 Unknown，年份无效用 ????）。
+- **论文状态单一来源**：`papers.user_mark`（NULL=待审阅，ignore/lurk/imported 为其余状态）；
+  冗余的 `status` 列已删除，`PENDING_WHERE = user_mark IS NULL` 为待审阅唯一判据。
 - **评级颜色单一来源**：`app/app-meta.json` 的 `remark_colors`。前端 app.js 注入 CSS 变量
   `--remark-*`，邮件 renderer 直接读 app-meta；style.css 用 `var(--remark-*)` 引用。
 - **今日过滤统一**：邮件（`report.send_fetch_report`）与 Web（`/api/papers?range=today`）

@@ -1,6 +1,7 @@
 """论文审阅相关端口：/api/papers、/api/static、/api/fetch/status、/api/fetch/events、/mark。"""
 
 import datetime
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -13,6 +14,20 @@ router = APIRouter()
 
 # /api/papers 合法 range 取值（与 docs/api.md 及前端下拉一致）
 _VALID_RANGES = {"all", "today", "7d", "30d"}
+
+# 状态变更端口的允许 Origin（本服务只面向本机浏览器，拒绝跨源 form POST 的 CSRF）
+_ALLOWED_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _is_same_site(request: Request) -> bool:
+    """Origin 头缺失（同源导航/curl）或 host 为本机回环时放行，否则拒绝（CSRF 防御）。"""
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    try:
+        return urlparse(origin).hostname in _ALLOWED_ORIGIN_HOSTS
+    except ValueError:
+        return False
 
 
 @router.get("/api/papers")
@@ -45,8 +60,10 @@ async def api_fetch_status():
 
     遍历今天的日志找最新 success，避免「最新一条是 failed」时掩盖更早的成功记录。
     """
+    from src.config.settings import today_str
+
     db = PaperDB()
-    log = db.get_last_success(datetime.date.today().isoformat())
+    log = db.get_last_success(today_str())
     if log:
         return JSONResponse(
             content={
@@ -77,6 +94,8 @@ async def mark_paper(
     mark_type: str = Form(...),
 ):
     """标记论文（纯 DB 操作，不入 Zotero；mark_type 取值 UserMark + pending）。"""
+    if not _is_same_site(request):
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
     allowed = {UserMark.IGNORE.value, UserMark.LURK.value, UserMark.PENDING.value}
     if mark_type not in allowed:
         raise HTTPException(status_code=400, detail=f"Invalid mark type: {mark_type}")

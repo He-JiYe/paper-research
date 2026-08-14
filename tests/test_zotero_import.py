@@ -1,6 +1,6 @@
 """ImportManager 后台导入编排测试：假 pyzotero + 假 DB，不触网。
 
-覆盖：新论文导入 / 已在 Zotero 去重并标记 web 端已处理 / 单飞拒绝 / 批量 / on_done 回调。
+覆盖：新论文导入 / 重复导入创建新条目（不做去重）/ 单飞拒绝 / 批量 / on_done 回调。
 （PDF 附件功能已移除：本机 Zotero connector 只读，不支持本地添加附件。）
 """
 
@@ -98,44 +98,23 @@ class TestImportFlow:
         # items_status 记录 item=imported（合成 key "source:source_id"）
         assert job["items_status"]["arxiv:a1"] == {"item": "imported"}
 
-    def test_existing_item_not_modified(self, mgr):
+    def test_reimport_creates_new_item(self, mgr):
+        """重复导入同一 item 不再去重：每次都创建新条目（Zotero 允许重复）。"""
         job1 = _job("a1")
         asyncio.run(mgr._run(job1, [_item("a1")]))
-        it = mgr._zotero._client._items[_first(job1)["zotero_key"]]
-
-        job2 = _job("a1")
-        asyncio.run(mgr._run(job2, [_item("a1", short_title="SHOULD_NOT_CHANGE")]))
-        assert job2["status"] == "done", job2.get("error")
-        assert _first(job2)["created"] is False
-        assert it["data"]["shortTitle"] == "ST1"  # 内容未被改动
-        assert len(mgr._zotero._client._items) == 1
-        # 已在 Zotero → web 端也标记 imported（移入已处理）
-        imported_marks = [m for m in mgr._fake_db.marks if m["mark_type"] == "imported"]
-        assert len(imported_marks) == 2  # job1 导入 + job2 跳过各标记一次
-
-    def test_existing_without_collection_skips(self, mgr):
-        """已存在且无分类要求 → 直接跳过，不重复创建，但标记 web 端已处理。"""
-        job1 = _job("a1")
-        asyncio.run(mgr._run(job1, [_item("a1", coll="")]))
-        job2 = _job("a1")
-        asyncio.run(mgr._run(job2, [_item("a1", coll="")]))
-        assert job2["status"] == "done", job2.get("error")
-        assert _first(job2)["created"] is False
-        assert len(mgr._zotero._client._items) == 1
-        imported_marks = [m for m in mgr._fake_db.marks if m["mark_type"] == "imported"]
-        assert len(imported_marks) == 2
-
-    def test_existing_with_new_collection_skips_no_duplicate(self, mgr):
-        """已存在于 Zotero + 归档到新分类 → 跳过不重复创建（B2）。"""
-        job1 = _job("a1")
-        asyncio.run(mgr._run(job1, [_item("a1", coll="N / X")]))
-        assert len(mgr._zotero._client._items) == 1
+        key1 = _first(job1)["zotero_key"]
 
         job2 = _job("a1")
         asyncio.run(mgr._run(job2, [_item("a1", coll="Other")]))
         assert job2["status"] == "done", job2.get("error")
-        assert _first(job2)["created"] is False
-        assert len(mgr._zotero._client._items) == 1  # 不产生第二条目
+        first = _first(job2)
+        assert first["created"] is True
+        assert first["zotero_key"] != key1  # 新条目，key 不同
+        assert job2["items_status"]["arxiv:a1"] == {"item": "imported"}
+        assert len(mgr._zotero._client._items) == 2  # 产生第二条目
+        # 两次导入都回写 imported（本地关联更新为最新 key）
+        imported_marks = [m for m in mgr._fake_db.marks if m["mark_type"] == "imported"]
+        assert len(imported_marks) == 2
 
     def test_batch_imports_all(self, mgr):
         job = _job("batch")
@@ -146,6 +125,7 @@ class TestImportFlow:
 
     def test_partial_failure_marks_successful_only(self, mgr, monkeypatch):
         """批量部分失败：成功项落库为 imported，失败项不伪造，任务走 error 终态。"""
+
         async def _partial_create_items(papers, *, short_titles=None, collection_keys=None):
             return ["KEY1", None]  # 第二篇被 Zotero 拒绝
 
@@ -182,11 +162,11 @@ class TestOnDone:
 
     def test_manager_on_done_error(self, mgr, monkeypatch):
         """任务失败时 on_done 收到 error 状态。"""
-        from unittest.mock import MagicMock
+        from unittest.mock import AsyncMock, MagicMock
 
         monkeypatch.setattr("src.db.PaperDB", lambda: FakeDB())
         zotero = MagicMock()
-        zotero.get_item.side_effect = RuntimeError("zotero down")
+        zotero.create_items = AsyncMock(side_effect=RuntimeError("zotero down"))
         events = []
         mgr2 = ZoteroImportManager(zotero, on_done=lambda r: events.append(r))
         job = _job("x1")

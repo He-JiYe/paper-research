@@ -86,7 +86,7 @@ class OpenAIProvider:
         if not self.api_key:
             return False
         try:
-            self._client().models.list()
+            self._client().models.list(timeout=_PROBE_CHAT_TIMEOUT)
             return True
         except Exception:
             # 兼容不支持 /models 的端点（vLLM/LM Studio 等）：降级为一次最小 chat 探测
@@ -117,6 +117,8 @@ class OpenAIProvider:
                 ],
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                timeout=_CHAT_TIMEOUT,  # SDK 默认 600s，挂起调用会阻塞评分线程数分钟
+                max_retries=1,  # SDK 内只重试一次，其余重试交给 PaperScorer 的降级逻辑
             )
             return resp.choices[0].message.content
         except Exception as e:
@@ -164,9 +166,7 @@ class OllamaProvider:
             if self._wait_ready():
                 logger.info("Ollama 已自动启动并就绪")
                 return True
-            logger.warning(
-                "Ollama 自动启动后 %s 秒内未就绪，评分将走 fallback", _START_TIMEOUT
-            )
+            logger.warning("Ollama 自动启动后 %s 秒内未就绪，评分将走 fallback", _START_TIMEOUT)
         return False
 
     def _ensure_started(self) -> None:

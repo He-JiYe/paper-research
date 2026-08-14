@@ -4,6 +4,7 @@ core 包无外部依赖，避免 ``utils ↔ network`` 循环 import；
 被 scorer / network / zotero / serve 多处复用。
 """
 
+import json
 import re
 
 # token 分词：字母数字词，支持 ``-``/``_`` 连接（全项目唯一定义处）
@@ -76,19 +77,20 @@ def relevance_score(paper: dict, keyword: str) -> float:
     score = (overlap_title * 2 + overlap_abstract) / (n * 3)
     return round(min(1.0, score), 4)
 
-
-def suggest_short_title(paper: dict, *, keyword: str = "", prefix: str = "未读-") -> str:
+def suggest_short_title(paper: dict) -> str:
     """生成短标题（单一来源：Web 回填与 Zotero 兜底共用）。
 
-    - Web 回填（默认 prefix="未读-"）：``未读-{关键词}-{年份}-{缩写}``，
-      关键词缺省（keyword 与 paper.keyword_match 均为空）时用 ``Unknown``；
-    - Zotero 兜底（prefix=""）：``{关键词 or Unknown}-{年份}-{缩写}``。
+    格式：
+    - 抓取数据 ``raw_data.comment`` 非空 → ``{comment}-{缩写}``，comment 空格转连字符
+      并清理非字母数字字符（如 ``ICLR 2025`` → ``ICLR-2025``）；
+    - 无 comment → ``{source}-{year}-{缩写}``，year 取 ``updated`` 前 4 位
+      （无效用 ``????``），source 取 ``paper.source``，均为空时用 ``Unknown``。
 
-    例：``未读-test-time adaptation-2024-SimpLearni``。
+    例：``ICLR-2025-SimpLearni``（comment="ICLR 2025"）；``arxiv-2024-SimpLearni``。
     """
-    year = (paper.get("published", "") or "")[:4]
+    abbrev = extract_title_abbrev(paper.get("title", "")) or "Paper"
+    year = (paper.get("updated", "") or "")[:4]
     if not year or not year.isdigit():
         year = "????"
-    kw = keyword or paper.get("keyword_match", "") or "Unknown"
-    abbrev = extract_title_abbrev(paper.get("title", "")) or "Paper"
-    return f"{prefix}{kw}-{year}-{abbrev}"
+    source = paper.get("source", "") or "Unknown"
+    return f"{source}-{year}-{abbrev}"

@@ -20,7 +20,9 @@ def send_fetch_report(settings, db) -> dict:
         db: PaperDB 实例
 
     Returns:
-        {"sent": bool, "reason": str | None} —— reason 为跳过原因（如 "no pending papers"）。
+        {"sent": bool, "reason": str | None} —— reason 为未发送原因：
+        "no pending papers"（今日无待审阅）/ "email disabled"（未启用）/
+        "smtp config incomplete"（配置不全）/ "send failed"（SMTP 发送失败）。
     """
     from src.config.settings import get_active_keywords
     from src.notify.sender import EmailNotifier
@@ -31,14 +33,20 @@ def send_fetch_report(settings, db) -> dict:
         logger.info("今日无待审阅论文，跳过邮件通知")
         return {"sent": False, "reason": "no pending papers"}
 
+    notifier = EmailNotifier(settings.notification)
+    if not settings.notification.enabled:
+        return {"sent": False, "reason": "email disabled"}
+    if not notifier.is_configured():
+        logger.warning("邮件配置不完整，跳过发送")
+        return {"sent": False, "reason": "smtp config incomplete"}
+
     server_cfg = settings.server
     # 邮件链接须用可访问地址：host=0.0.0.0/::（监听所有接口）时改用 127.0.0.1，否则收件人收到死链。
     host = server_cfg.host if server_cfg.host not in ("0.0.0.0", "::") else "127.0.0.1"
-    notifier = EmailNotifier(settings.notification)
     sent = notifier.send_fetch_report(
         stats=db.get_stats(fetch_date_from=today),
         new_papers=pending,
         keywords=[kw.keyword for kw in get_active_keywords(settings)],
         server_url=f"http://{host}:{server_cfg.port}",
     )
-    return {"sent": sent, "reason": None}
+    return {"sent": sent, "reason": None if sent else "send failed"}

@@ -14,12 +14,22 @@ from src.notify.renderer import render_email_report
 
 logger = logging.getLogger(__name__)
 
+# SMTP 连接超时（秒）：主机不可达/握手卡死时快速失败，避免无限阻塞
+_SMTP_TIMEOUT = 15.0
+
 
 class EmailNotifier:
     """邮件通知器 —— 抓取完成后发送报告邮件。"""
 
     def __init__(self, config: EmailConfig):
         self.config = config
+
+    def is_configured(self) -> bool:
+        """发送所必需的 SMTP 配置是否齐全（enabled + host + 账号 + 收发地址）。"""
+        cfg = self.config
+        return bool(
+            cfg.enabled and cfg.smtp_host and cfg.username and cfg.from_addr and cfg.to_addr
+        )
 
     def send_fetch_report(
         self,
@@ -44,7 +54,7 @@ class EmailNotifier:
         cfg = self.config
         if not cfg.enabled:
             return False
-        if not cfg.smtp_host or not cfg.username:
+        if not self.is_configured():
             logger.warning("Email enabled but SMTP config incomplete, skipping")
             return False
 
@@ -72,10 +82,11 @@ class EmailNotifier:
         """按端口选择传输：465 用 SSL（SMTP_SSL），其余端口用 SMTP + STARTTLS。
 
         常见 QQ/163 的 465 走 SSL；Gmail 等 587 走 STARTTLS，两者都支持。
+        均带连接超时，主机不可达时快速失败而非无限阻塞。
         """
         if cfg.smtp_port == 465:
-            return smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port)
-        server = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port)
+            return smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, timeout=_SMTP_TIMEOUT)
+        server = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=_SMTP_TIMEOUT)
         server.ehlo()
         server.starttls()
         server.ehlo()

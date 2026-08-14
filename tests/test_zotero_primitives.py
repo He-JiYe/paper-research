@@ -75,18 +75,10 @@ class TestCreateItems:
             zc.create_items(_papers(), short_titles=["T1", "T2"], collection_keys=[c_key, c_key])
         )
         assert len(keys) == 2
-        for k, sid, st in zip(keys, ["x1", "x2"], ["T1", "T2"], strict=True):
+        for k, st in zip(keys, ["T1", "T2"], strict=True):
             d = zc._client._items[k]["data"]
             assert d["shortTitle"] == st
             assert c_key in d["collections"]
-            tags = {t["tag"] for t in d["tags"]}
-            assert f"sid:arxiv:{sid}" in tags
-
-    def test_find_item_by_sid_after_create(self, zc):
-        keys = asyncio.run(zc.create_items(_papers()[:1]))
-        found = zc.get_item("arxiv", "x1")
-        assert found is not None
-        assert found["key"] == keys[0]
 
     def test_create_items_empty_returns_empty(self, zc):
         assert asyncio.run(zc.create_items([])) == []

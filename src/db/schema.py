@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS papers (
     short_title     TEXT DEFAULT '',
     zotero_key      TEXT DEFAULT '',
 
-    status          TEXT DEFAULT 'summarized',
     fetch_date      TEXT DEFAULT '',
     marked_date     TEXT DEFAULT NULL,
 
@@ -34,8 +33,6 @@ CREATE TABLE IF NOT EXISTS papers (
     PRIMARY KEY (source, source_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_papers_status
-    ON papers(status);
 CREATE INDEX IF NOT EXISTS idx_papers_user_mark
     ON papers(user_mark);
 CREATE INDEX IF NOT EXISTS idx_papers_keyword

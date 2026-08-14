@@ -22,6 +22,7 @@ _SYSTEM_PROMPT = "You are an academic paper review assistant. Always respond in 
 _PROMPT_ABSTRACT_LIMIT = 2000  # 进 prompt 的摘要截断长度
 _PROBE_RETRIES_DEFAULT = 3  # LLM 可用性探测重试次数（扛服务冷启动/瞬时抖动）
 _PROBE_RETRY_DELAY_DEFAULT = 2.0  # 探测失败重试间隔（秒）
+_CALL_RETRY_DELAY = 1.0  # 评分中途调用失败（返回 None）的重试间隔（秒）
 
 
 class PaperScorer:
@@ -42,7 +43,9 @@ class PaperScorer:
     ):
         self._provider = provider
         self.max_retries = max_retries  # LLM 输出无效时的额外重试次数
-        self.max_concurrent = max_concurrent  # 批量评分并发数（本地 Ollama 串行，默认 1）
+        # 批量评分并发数；生产默认 1 来自 LLMConfig.max_concurrent（本地 Ollama 串行），
+        # 直接构造（测试）时默认 3
+        self.max_concurrent = max_concurrent
         self._probe_retries = probe_retries
         self._probe_retry_delay = probe_retry_delay
 
@@ -98,7 +101,8 @@ class PaperScorer:
     ) -> LLMResult | None:
         """单篇论文评分（同步，唯一实现）。
 
-        不可用 → 直接 fallback；可用 → 调 LLM，输出无效带错误说明重试，耗尽后 fallback。
+        不可用 → 直接 fallback；可用 → 调 LLM，调用失败（None）与输出无效均带有限
+        重试，耗尽后 fallback。
 
         source/updated 随 prompt 提供给 LLM（来源与时效性辅助判断）。
         """
@@ -117,7 +121,16 @@ class PaperScorer:
         for attempt in range(self.max_retries + 1):
             content = self._call(system_prompt=_SYSTEM_PROMPT, user_prompt=prompt)
             if content is None:
-                logger.warning("LLM 调用失败，使用 fallback 评分")
+                # 调用失败/超时：与输出无效同一重试预算，短等后重试（抗瞬时抖动）
+                if attempt < self.max_retries:
+                    logger.warning(
+                        "LLM 调用失败（第 %s/%s 次），短等后重试",
+                        attempt + 1,
+                        self.max_retries + 1,
+                    )
+                    time.sleep(_CALL_RETRY_DELAY)
+                    continue
+                logger.warning("LLM 调用多次失败，使用 fallback 评分")
                 return fallback_score(
                     title, abstract, keyword, source=ScoreSource.FALLBACK_CONNECTION
                 )
@@ -150,11 +163,11 @@ class PaperScorer:
             self.score, title, abstract, categories, keyword, source, updated
         )
 
-    async def score_batch_async(
-        self,
-        papers: list[dict]
-    ) -> list[LLMResult | None]:
+    async def score_batch_async(self, papers: list[dict]) -> list[LLMResult]:
         """批量评分（异步并发，Semaphore 控制并发数）。
+
+        异常/None 条目经 ``_fallback_for_exception`` 一律转 fallback LLMResult，
+        因此返回列表与输入等长且每项非 None。
         """
         if not papers:
             return []
@@ -164,11 +177,7 @@ class PaperScorer:
         tasks = [_score_one(sem, self, p, i, len(papers)) for i, p in enumerate(papers)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return [
-            (
-                r
-                if isinstance(r, LLMResult)
-                else _fallback_for_exception(r, papers[i], i)
-            )
+            (r if isinstance(r, LLMResult) else _fallback_for_exception(r, papers[i], i))
             for i, r in enumerate(results)
         ]
 

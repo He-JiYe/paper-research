@@ -53,9 +53,6 @@ class FakeScorer:
     def score(self, *a, **kw):
         return _DummyScore()
 
-    def score_batch(self, papers, **kw):
-        return [_DummyScore() for _ in papers]
-
     async def score_batch_async(self, papers, **kw):
         return [_DummyScore() for _ in papers]
 
@@ -67,15 +64,11 @@ def _settings() -> AppConfig:
             sources=[
                 SourceConfig(
                     source="arxiv",
-                    options=ArxivOptions(
-                        max_results=7, lookback_days=2, sort_by="lastUpdatedDate"
-                    ),
+                    options=ArxivOptions(max_results=7, lookback_days=2, sort_by="lastUpdatedDate"),
                 ),
                 SourceConfig(
                     source="arxiv",
-                    options=ArxivOptions(
-                        max_results=9, lookback_days=5, sort_by="lastUpdatedDate"
-                    ),
+                    options=ArxivOptions(max_results=9, lookback_days=5, sort_by="lastUpdatedDate"),
                 ),
             ]
         ),
@@ -198,3 +191,56 @@ async def test_dry_run_zero_papers_does_not_write_fetch_log(monkeypatch):
     )
     assert result["fetched"] == 0
     assert db.logs == []  # dry-run 不写 fetch_log
+
+
+@pytest.mark.asyncio
+async def test_zero_new_papers_writes_success_log(monkeypatch):
+    """非 dry-run 抓取到 0 篇也写一条成功日志（has_successful_since 补抓判定正确性的关键）。"""
+    settings = _settings()
+    db = FakeDB()
+
+    async def fake_fetch(self, options):
+        return []
+
+    FakeSource = type("FakeSource", (), {"fetch": fake_fetch})
+    monkeypatch.setattr(REGISTRY.sources, "get", lambda name: FakeSource)
+    monkeypatch.setattr(fp, "PaperScorer", FakeScorer)
+
+    result = await fp.run_fetch_pipeline(settings, settings.keywords, 0, db=db, mode="incremental")
+
+    assert result["new"] == 0
+    assert len(db.logs) == 1
+    assert db.logs[0]["papers_fetched"] == 0
+    assert db.logs[0]["papers_new"] == 0
+    assert db.logs[0]["run_time"]  # 与补抓判定同口径的秒级时间戳
+
+
+@pytest.mark.asyncio
+async def test_dedup_by_source_id_and_scored_fields_written(monkeypatch):
+    """同 (source, source_id) 多关键词命中只评分一次（保留首个 keyword_match），评分字段落库。"""
+    settings = _settings()
+    db = FakeDB()
+
+    async def fake_fetch(self, options):
+        # 两个源返回同一篇（同 source_id）→ 去重后只评分/入库一次
+        return [
+            Record(title="dup", source="arxiv", source_id="dup1", keyword_match="WAM"),
+            Record(title="dup", source="arxiv", source_id="dup1", keyword_match="RL"),
+        ]
+
+    FakeSource = type("FakeSource", (), {"fetch": fake_fetch})
+    monkeypatch.setattr(REGISTRY.sources, "get", lambda name: FakeSource)
+    monkeypatch.setattr(fp, "PaperScorer", FakeScorer)
+
+    result = await fp.run_fetch_pipeline(settings, settings.keywords, 0, db=db, mode="incremental")
+
+    assert result["fetched"] == 1  # 去重后仅 1 篇
+    assert result["new"] == 1
+    assert result["summarized"] == 1
+    assert len(db.added) == 1
+    row = db.added[0]
+    assert row["keyword_match"] == "WAM"  # 保留首个命中的关键词
+    assert row["llm_summary"] == "s"  # 评分字段已写回
+    assert row["llm_remark"] == "r"
+    assert row["llm_score"] == 0.8
+    assert row["score_source"] == ScoreSource.LLM.value

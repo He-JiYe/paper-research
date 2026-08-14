@@ -34,7 +34,12 @@ class FetchOptions(ABC):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "FetchOptions":
-        """从字典中自动匹配并设置字段值（未声明的键安全丢弃）。"""
+        """从字典中自动匹配并设置字段值（未声明的键安全丢弃）。
+
+        只做字段名过滤，**不做嵌套类型转换**：``keywords`` 必须由调用方传入
+        ``KeywordItem`` 列表（生产路径 pipeline 注入），传原始 dict 会在 ``to_list()``
+        访问 ``kw.keyword`` 时 AttributeError。
+        """
         field_names = {f.name for f in fields(cls)}
         filtered_data = {k: v for k, v in data.items() if k in field_names}
         return cls(**filtered_data)

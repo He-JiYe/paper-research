@@ -21,33 +21,9 @@ def test_defaults_present():
     assert meta["section_labels"]["lurk"] == "延后处理"
 
 
-def test_suggest_short_title_full():
-    """完整字段 → 未读-关键词-年份-缩写"""
-    paper = {
-        "published": "2024-03-01",
-        "keyword_match": "test-time adaptation",
-        "title": "Test-Time Adaptation with Transformers",
-    }
-    title = suggest_short_title(paper)
-    assert title.startswith("未读-test-time adaptation-2024-")
-    assert len(title) <= 60
-
-
-def test_suggest_short_title_missing_year():
-    """年份缺失 → ????"""
-    paper = {"published": "", "keyword_match": "kw", "title": "A Novel Method"}
-    assert "????" in suggest_short_title(paper)
-
-
-def test_suggest_short_title_no_keyword():
-    """无关键词 → Unknown"""
-    paper = {"published": "2024-01-01", "keyword_match": "", "title": "A Novel Method"}
-    assert suggest_short_title(paper).startswith("未读-Unknown-2024-")
-
-
 def test_suggest_short_title_empty_title():
     """空标题兜底 → Paper"""
-    paper = {"published": "2024-01-01", "keyword_match": "kw", "title": ""}
+    paper = {"published": "2024-01-01", "title": ""}
     assert suggest_short_title(paper).endswith("Paper")
 
 

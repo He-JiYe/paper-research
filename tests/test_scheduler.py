@@ -22,25 +22,28 @@ def _patch_today(scheduler, day: datetime):
 class TestFetchedSinceFetchTime:
     """_fetched_since_fetch_time：拿 run_time 与「今日 fetch_time」比较（补抓判定）。"""
 
-    def test_true_when_success_after_fetch_time(self, scheduler):
+    @pytest.mark.asyncio
+    async def test_true_when_success_after_fetch_time(self, scheduler):
         with patch("src.db.PaperDB") as mock_db_cls:
             mock_db_cls.return_value.has_successful_since.return_value = True
             with _patch_today(scheduler, datetime(2026, 7, 24, 10, 0)):
-                assert scheduler._fetched_since_fetch_time() is True
+                assert await scheduler._fetched_since_fetch_time() is True
             # fetch_time=09:00 → since 取「今日 09:00:00」
             mock_db_cls.return_value.has_successful_since.assert_called_once_with(
                 "2026-07-24 09:00:00"
             )
 
-    def test_false_when_no_success_log(self, scheduler):
+    @pytest.mark.asyncio
+    async def test_false_when_no_success_log(self, scheduler):
         with patch("src.db.PaperDB") as mock_db_cls:
             mock_db_cls.return_value.has_successful_since.return_value = False
             with _patch_today(scheduler, datetime(2026, 7, 24, 10, 0)):
-                assert scheduler._fetched_since_fetch_time() is False
+                assert await scheduler._fetched_since_fetch_time() is False
 
-    def test_false_on_db_error(self, scheduler):
+    @pytest.mark.asyncio
+    async def test_false_on_db_error(self, scheduler):
         with patch("src.db.PaperDB", side_effect=RuntimeError("db locked")):
-            assert scheduler._fetched_since_fetch_time() is False
+            assert await scheduler._fetched_since_fetch_time() is False
 
 
 class TestRunFetchNotify:
@@ -122,8 +125,10 @@ class TestScheduledSkip:
     async def test_start_skips_when_already_fetched(self, scheduler):
         mock_run_fetch = AsyncMock()
         with (
-            patch.object(scheduler, "_should_catch_up", return_value=False),
-            patch.object(scheduler, "_fetched_since_fetch_time", return_value=True),
+            patch.object(scheduler, "_should_catch_up", new_callable=AsyncMock, return_value=False),
+            patch.object(
+                scheduler, "_fetched_since_fetch_time", new_callable=AsyncMock, return_value=True
+            ),
             patch.object(scheduler, "_run_fetch", mock_run_fetch),
             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
         ):
@@ -138,7 +143,7 @@ class TestScheduledSkip:
         """启动补抓：应执行一次 _run_fetch（补今日抓取）。"""
         mock_run_fetch = AsyncMock()
         with (
-            patch.object(scheduler, "_should_catch_up", return_value=True),
+            patch.object(scheduler, "_should_catch_up", new_callable=AsyncMock, return_value=True),
             patch.object(scheduler, "_run_fetch", mock_run_fetch),
             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
         ):
@@ -161,4 +166,4 @@ def test_should_catch_up_before_time(scheduler, monkeypatch):
     from datetime import datetime
 
     monkeypatch.setattr(scheduler, "_now", lambda: datetime(2026, 8, 12, 6, 0))  # 08:30 前
-    assert scheduler._should_catch_up() is False
+    assert asyncio.run(scheduler._should_catch_up()) is False

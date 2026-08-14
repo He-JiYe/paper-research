@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import re
 
-from src.zotero.utils import TAG_SID
-
 
 def split_collection_path(ref: str) -> list[str]:
     """把 ``"A / B / C"`` 路径拆成逐级名称列表（去空、去空白）。
@@ -91,8 +89,8 @@ def paper_to_zotero_item(
     - ``archiveID``（存档ID）= ``{source}:{source_id}``；``language`` = "en"；
     - ``date`` 归一化为 ``YYYY-MM-DD``；``DOI`` 取自 ``raw_data``（arxiv 源已存 doi）；
     - ``short_title`` / ``collection_key`` 参数化写入原生字段；
-    - 反查/去重依赖 ``sid:{source}:{id}`` 标签；extra 只写引用分类（raw_data.citation），
-      source/source_id/shortTitle 已由原生字段承载，不再冗余写入 extra。
+    - extra 只写引用分类（raw_data.citation），source/source_id/shortTitle 已由原生字段承载，
+      不再冗余写入 extra。
     """
     source = paper.get("source", "")
     source_id = paper.get("source_id", "")
@@ -112,8 +110,6 @@ def paper_to_zotero_item(
         "libraryCatalog": source,  # 文库编目
         "language": "en",  # 语言
         "shortTitle": short_title,
-        # sid 标签用于按 (source, source_id) 反查/去重
-        "tags": [{"tag": TAG_SID.format(source=source, id=source_id), "type": 1}],
     }
     if collection_key:
         item["collections"] = [collection_key]

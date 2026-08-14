@@ -17,7 +17,6 @@ def _add_paper(db: PaperDB, source_id: str = "2501.12345", source: str = "arxiv"
                 "source_id": source_id,
                 "title": "Some Paper",
                 "authors": "Alice Zhang",
-                "status": "summarized",
                 "fetch_date": "2026-07-24",
             }
         ]
@@ -35,7 +34,6 @@ class TestImportedMark:
 
         paper = db.get_paper("arxiv", "2501.12345")
         assert paper["user_mark"] == "imported"
-        assert paper["status"] == "reviewed"
         assert paper["short_title"] == "未读-RL-2025-Mult"
         assert paper["zotero_key"] == "ABC123"
         assert paper["marked_date"]  # 非空
@@ -68,7 +66,6 @@ class TestImportedMark:
 
         paper = db.get_paper("arxiv", "2501.12345")
         assert paper["user_mark"] is None
-        assert paper["status"] == "summarized"
         assert paper["short_title"] == ""  # 离开 imported 即清空
         assert paper["zotero_key"] == ""  # 离开 imported 即清空
         assert len(db.get_pending()) == 1
@@ -101,7 +98,6 @@ class TestPendingOrdering:
                     "source": "arxiv",
                     "source_id": "2501.00001",
                     "title": "Low",
-                    "status": "summarized",
                     "llm_score": 0.3,
                     "fetch_date": "2026-07-24",
                 },
@@ -109,7 +105,6 @@ class TestPendingOrdering:
                     "source": "arxiv",
                     "source_id": "2501.00002",
                     "title": "High",
-                    "status": "summarized",
                     "llm_score": 0.9,
                     "fetch_date": "2026-07-24",
                 },
@@ -117,7 +112,6 @@ class TestPendingOrdering:
                     "source": "arxiv",
                     "source_id": "2501.00003",
                     "title": "Mid",
-                    "status": "summarized",
                     "llm_score": 0.6,
                     "fetch_date": "2026-07-24",
                 },

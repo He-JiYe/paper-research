@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _DRY_RUN_PREVIEW = 10  # dry-run 预览最多打印的论文数
 
+
 def _result(
     fetched: int,
     new: int,
@@ -80,11 +81,12 @@ async def run_fetch_pipeline(
     records_all: list = []
     for source_cfg in settings.fetch.sources:
         source_name = source_cfg.source
-        source_cls = REGISTRY.sources.get(source_name)
+        source_cls = REGISTRY.sources.get(source_name)  # 未知源名 → ValueError（fail fast）
         source = source_cls()
 
         # ── 1.1 构建 skip_ids（按 source 作用域：DB 已有）────
-        skip_ids: set[str] = db.get_existing_ids(source_name)
+        # SQLite 读放线程执行，避免阻塞 serve 事件循环（与评分/邮件同策略）
+        skip_ids: set[str] = await asyncio.to_thread(db.get_existing_ids, source_name)
         logger.info("[%s]: DB 已有 %s 篇", source_name, len(skip_ids))
         logger.info("[%s] 开始抓取 (%s模式，跳过 %s 篇已有)...", source_name, mode, len(skip_ids))
 
@@ -98,17 +100,13 @@ async def run_fetch_pipeline(
             {
                 "keywords": keywords,
                 "skip_ids": skip_ids,
-                "sort_by": "relevance"
-                if is_historical
-                else opts_dict.get("sort_by", "relevance"),
-                "lookback_days": 0
-                if is_historical
-                else opts_dict.get("lookback_days", 0),
+                "sort_by": "relevance" if is_historical else opts_dict.get("sort_by", "relevance"),
+                "lookback_days": 0 if is_historical else opts_dict.get("lookback_days", 0),
             }
         )
         if max_results and max_results > 0:
             opts_dict["max_results"] = max_results  # 调用方覆盖（CLI/调度器）
-        opt_cls = REGISTRY.options.get(source_name)  # 未知源名 → 已抛 ValueError
+        opt_cls = REGISTRY.options.get(source_name)
         options = opt_cls.from_dict(opts_dict)
 
         records = await source.fetch(options)
@@ -121,6 +119,7 @@ async def run_fetch_pipeline(
 
     # 同一篇（source, source_id）可能被多个关键词命中而重复出现：评分前按主键去重，
     # 避免重复 LLM 调用，也避免 INSERT OR IGNORE 静默丢弃第二行。
+    # 命中多关键词时保留首个的 keyword_match（单关键词语义，第二个起丢弃）。
     seen: set[tuple[str, str]] = set()
     deduped: list[dict] = []
     for p in to_score:
@@ -161,11 +160,13 @@ async def run_fetch_pipeline(
     summarized_count, to_score = await score_rows(scorer, to_score)
 
     # ── 3. 写入数据库 ────────────────────────────────────
-    new_count = db.add_papers(to_score)
+    # SQLite 写（持全局写锁）放线程执行，避免阻塞 serve 事件循环
+    new_count = await asyncio.to_thread(db.add_papers, to_score)
     logger.info("已写入数据库: %s/%s 篇", new_count, len(to_score))
 
     # ── 4. 记录抓取日志 ──────────────────────────────────
-    db.add_fetch_log(
+    await asyncio.to_thread(
+        db.add_fetch_log,
         keywords_used=len(keywords),
         papers_fetched=len(to_score),
         papers_new=new_count,

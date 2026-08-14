@@ -51,7 +51,7 @@ class TestEmailNotifier:
             server_url="http://127.0.0.1:8899",
         )
         assert result is True
-        mock_smtp.assert_called_once_with("smtp.qq.com", 465)
+        mock_smtp.assert_called_once_with("smtp.qq.com", 465, timeout=15.0)
         mock_server.send_message.assert_called_once()
 
     @patch("smtplib.SMTP_SSL")

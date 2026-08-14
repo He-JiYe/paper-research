@@ -1,6 +1,6 @@
 """Arxiv API 客户端测试（基于 arxiv 库）"""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import arxiv
@@ -100,6 +100,7 @@ class TestAdapt:
         assert recs[0].source_id == "2401.00001"
         assert recs[0].raw_data["version"] == 1
 
+
 class TestBuildQuery:
     """测试 ArxivOptions.build_query（共享 KeywordItem → 查询串）"""
 
@@ -110,11 +111,9 @@ class TestBuildQuery:
         assert self._build("test-time adaptation") == "all:test-time adaptation"
 
     def test_with_categories(self):
+        # 空格分隔的未编码查询（arxiv 库内部负责 urlencode；+OR+/+AND+ 会被二次编码成字面量 +）
         query = self._build("test-time adaptation", ["cs.CV", "cs.LG"])
-        assert "cat:cs.CV" in query
-        assert "cat:cs.LG" in query
-        assert "AND" in query
-        assert "all:test-time adaptation" in query
+        assert query == "(cat:cs.CV OR cat:cs.LG) AND all:test-time adaptation"
 
     def test_keyword_with_not(self):
         query = self._build("vision-language model NOT detection", ["cs.CV"])
@@ -184,6 +183,15 @@ class TestToList:
         """时间排序必须携带增量窗口（lookback_days>0），否则加载即报错（fail-fast）"""
         with pytest.raises(ValueError, match="lookback_days"):
             ArxivOptions(sort_by="lastUpdatedDate")  # lookback 默认 0
+
+    def test_time_sort_rejects_ascending(self):
+        """时间排序 + 升序会静默返回 0 篇（升序首篇最旧必触发窗口截断），加载即报错"""
+        with pytest.raises(ValueError, match="ascending"):
+            ArxivOptions(sort_by="lastUpdatedDate", lookback_days=3, sort_order="ascending")
+        with pytest.raises(ValueError, match="ascending"):
+            ArxivOptions(sort_by="submittedDate", lookback_days=3, sort_order="ascending")
+        # 相关性排序不受影响（不做窗口截断）
+        ArxivOptions(sort_by="relevance", sort_order="ascending")
 
 
 class TestSingleFetch:
@@ -262,7 +270,7 @@ class TestFetch:
 
     @pytest.mark.asyncio
     async def test_fetch_all(self):
-        """多关键词并发抓取，keyword_match 回填各自关键词"""
+        """多关键词抓取（共享 Client + 错峰启动），keyword_match 回填各自关键词"""
         mock_results_1 = [_make_mock_result("2401.00001")]
         mock_results_2 = [_make_mock_result("2401.00002")]
 
@@ -276,6 +284,7 @@ class TestFetch:
                     keywords=_kw({"keyword": "a"}, {"keyword": "b", "categories": ["cs.LG"]}),
                     max_results=50,
                     sort_by="relevance",
+                    delay_seconds=0,  # 测试免错峰等待
                 )
             )
 
@@ -283,6 +292,8 @@ class TestFetch:
             kw_map = {r.source_id: r.keyword_match for r in records}
             assert kw_map["2401.00001"] == "a"
             assert kw_map["2401.00002"] == "b"
+            # 共享同一个 Client（限流节流跨关键词生效）
+            assert mock_client_cls.call_count == 1
 
     @pytest.mark.asyncio
     async def test_no_dedup(self):
@@ -296,7 +307,12 @@ class TestFetch:
             mock_client_cls.return_value = mock_client
 
             records = await ArxivSource().fetch(
-                ArxivOptions(keywords=_kw("a", "b"), max_results=50, sort_by="relevance"),
+                ArxivOptions(
+                    keywords=_kw("a", "b"),
+                    max_results=50,
+                    sort_by="relevance",
+                    delay_seconds=0,
+                )
             )
 
             assert len(records) == 3  # 2401.00001 出现两次（不去重）
@@ -305,14 +321,19 @@ class TestFetch:
 class TestIncrementalPagination:
     """增量模式：分页抓完 lookback 窗口，按相关性重排后截断"""
 
+    @staticmethod
+    def _days_ago(days: int) -> str:
+        """相对今天的日期（防硬编码日期越过窗口后测试失效）。"""
+        return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
+
     @pytest.mark.asyncio
     async def test_stops_at_window_end(self):
         """第 1 页内出现超窗 → 停止，只留窗口内"""
         in_window = [
-            _make_mock_result("2401.00001", published="2026-08-09"),
-            _make_mock_result("2401.00002", published="2026-08-08"),
+            _make_mock_result("2401.00001", published=self._days_ago(1)),
+            _make_mock_result("2401.00002", published=self._days_ago(2)),
         ]
-        past = _make_mock_result("2401.00003", published="2026-01-01")
+        past = _make_mock_result("2401.00003", published=self._days_ago(30))
         opts = ArxivOptions(
             keywords=_kw("test"), max_results=50, lookback_days=7, sort_by="lastUpdatedDate"
         )
@@ -334,12 +355,12 @@ class TestIncrementalPagination:
         )
         range_size = opts.to_list()[0][1].max_results  # = min(8*AVG_PER_DAY, 2000)
         page1 = [
-            _make_mock_result(f"2401.{i:05d}", published="2026-08-09")
+            _make_mock_result(f"2401.{i:05d}", published=self._days_ago(1))
             for i in range(1, range_size + 1)
         ]
         page2 = [
-            _make_mock_result("2501.00001", published="2026-08-08"),
-            _make_mock_result("2501.00002", published="2026-01-01"),
+            _make_mock_result("2501.00001", published=self._days_ago(2)),
+            _make_mock_result("2501.00002", published=self._days_ago(30)),
         ]
         with patch("src.network.source.arxiv.Client") as mock_client_cls:
             mock_client = MagicMock()
@@ -362,9 +383,11 @@ class TestIncrementalPagination:
             sort_by="lastUpdatedDate",
         )
         matched = _make_mock_result(
-            "2401.00001", title="test-time adaptation for LLMs", published="2026-08-09"
+            "2401.00001", title="test-time adaptation for LLMs", published=self._days_ago(1)
         )
-        unrelated = _make_mock_result("2401.00002", title="unrelated title", published="2026-08-08")
+        unrelated = _make_mock_result(
+            "2401.00002", title="unrelated title", published=self._days_ago(2)
+        )
         with patch("src.network.source.arxiv.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.results.return_value = [unrelated, matched]  # API 返回序：unrelated 在前

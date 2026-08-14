@@ -23,6 +23,7 @@ import asyncio
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import chain
 
 from arxiv import Client, Result, Search, SortCriterion, SortOrder
 
@@ -89,6 +90,7 @@ def _filter_page_results(
         papers.append(r)
     return False
 
+
 # ─── Arxiv 抓取参数 ──────────────────────────────────────────
 
 
@@ -119,9 +121,11 @@ class ArxivOptions(FetchOptions):
         arxiv API 单次请求上限 ``_ARXIV_MAX_RESULTS`` 条；page_size 放大到抓取范围。
 
         排序与增量窗口的强制约束：
-        - 相关性排序无法做时间窗口截断（_fetch 增量分页按 published 时间判断），
+        - 相关性排序无法做时间窗口截断（_fetch 增量分页按时间判断），
           强制 ``lookback_days = 0``（消除 relevance + lookback>0 时的窗口静默截断）；
-        - 时间排序必须携带 ``lookback_days > 0``，否则"抓完整窗口"语义不成立，加载即报错。
+        - 时间排序必须携带 ``lookback_days > 0``，否则"抓完整窗口"语义不成立，加载即报错；
+        - 时间排序不支持 ``ascending``：升序首篇最旧、必然触发窗口截断，增量会静默返回
+          0 篇（加载即报错，杜绝静默失效组合）。
         """
         if self.sort_by.lower() not in _SORT_MAP:
             raise ValueError(
@@ -129,13 +133,19 @@ class ArxivOptions(FetchOptions):
             )
         if self.sort_order.lower() not in ("ascending", "descending"):
             raise ValueError(f"未知 sort_order: {self.sort_order!r}（可选: ascending/descending）")
-        self.sort_order = self.sort_order.lower()  # 归一化，to_list 的 SortOrder 按小写值匹配
+        self.sort_by = self.sort_by.lower()  # 与 sort_order 一致归一化，避免混合大小写外泄
+        self.sort_order = self.sort_order.lower()  # to_list 的 SortOrder 按小写值匹配
 
-        if self.sort_by.lower() == "relevance":
+        if self.sort_by == "relevance":
             self.lookback_days = 0  # 相关性排序强制全量（不做时间窗口）
         elif self.lookback_days <= 0:
             raise ValueError(
                 f"时间排序 {self.sort_by!r} 要求 lookback_days > 0，收到 {self.lookback_days}"
+            )
+        elif self.sort_order == "ascending":
+            raise ValueError(
+                f"时间排序 {self.sort_by!r} 不支持 sort_order=ascending"
+                "（增量窗口截断依赖降序结果，升序会静默返回 0 篇）"
             )
 
         if self.lookback_days > 0:  # 按时间排序，返回预估值
@@ -151,12 +161,13 @@ class ArxivOptions(FetchOptions):
         categories 与 keyword 做 AND 组合（限定分类，不参与 OR 扩展）。
 
         Note:
-            arxiv 库的 Search 使用标准 Arxiv API 查询语法，
-            分类用 ``cat:XXX`` 前缀，关键词用 ``all:XXX`` 前缀。
+            arxiv 库的 Search 要求 query 传**未编码**形式（库内部经 urlencode 编码），
+            布尔算子用空格分隔——用 ``+OR+``/``+AND+`` 预编码会被二次编码成字面量 ``+``，
+            分类组合查询失效。分类用 ``cat:XXX`` 前缀，关键词用 ``all:XXX`` 前缀。
         """
         cat_part = ""
         if categories:
-            cat_part = "(" + "+OR+".join(f"cat:{c}" for c in categories) + ")+AND+"
+            cat_part = "(" + " OR ".join(f"cat:{c}" for c in categories) + ") AND "
         return f"{cat_part}all:{keyword}"
 
     def to_list(self) -> list[tuple[str, Search]]:
@@ -226,6 +237,34 @@ class ArxivSource(BaseSource[Result]):
             )
         return records
 
+    # ── 批量抓取（覆盖模板方法：多关键词共享 Client + 错峰启动）────────
+
+    async def fetch(self, options: ArxivOptions) -> list[Record]:
+        """多关键词抓取（覆盖 BaseSource 模板方法）。
+
+        两个 arXiv 限流防护：
+        - 多关键词共享同一个 ``Client``：``delay_seconds`` 的实例级节流
+          （``_last_request_dt``）跨关键词生效，分页请求不再互相击穿；
+        - 各关键词首个请求按 ``delay_seconds`` 错峰启动：避免 t=0 时 N 个
+          关键词并发发出首请求（首请求不受实例级节流保护）。
+        """
+        self._client = Client(
+            page_size=options.page_size,
+            delay_seconds=options.delay_seconds,
+            num_retries=options.num_retries,
+        )
+        try:
+            tasks = []
+            kws = options.to_list()
+            for kw in kws:
+                tasks.append(asyncio.create_task(self._try_fetch(kw, options)))
+                if len(tasks) < len(kws):
+                    await asyncio.sleep(options.delay_seconds)  # 错峰：间隔一个节流周期
+            lists = await asyncio.gather(*tasks)
+        finally:
+            self._client = None
+        return list(chain.from_iterable(lists))
+
     # ── 单关键词抓取 ────────────────────────────────────────────
 
     async def _fetch(
@@ -242,12 +281,17 @@ class ArxivSource(BaseSource[Result]):
         keyword, search = kw
         skip_ids = options.skip_ids
         lookback_days = options.lookback_days
-        range_size = search.max_results or options.page_size
+        range_size = search.max_results  # to_list 恒设 max_results=page_size
 
-        client = Client(
-            page_size=range_size,
-            delay_seconds=options.delay_seconds,
-            num_retries=options.num_retries,
+        # 多关键词经 fetch() 共享 Client（限流节流跨关键词生效）；直接调 _fetch 时兜底自建
+        client = (
+            self._client
+            if getattr(self, "_client", None) is not None
+            else Client(
+                page_size=range_size,
+                delay_seconds=options.delay_seconds,
+                num_retries=options.num_retries,
+            )
         )
 
         def _run(search_obj: Search, offset: int) -> list[Result]:
@@ -269,8 +313,9 @@ class ArxivSource(BaseSource[Result]):
             return papers[: options.max_results]
 
         # 增量：分页抓完 lookback 窗口
-        # 窗口截断按 published 时间判断；排序/窗口约束已由 __post_init__ 强制
-        # （时间排序必带 lookback_days>0，相关性排序强制 lookback_days=0），时间排序可靠。
+        # 窗口截断字段与排序字段一致（LastUpdatedDate 用 updated，SubmittedDate 用 published）；
+        # 排序/窗口约束已由 __post_init__ 强制（时间排序必带 lookback_days>0 且必须降序，
+        # 相关性排序强制 lookback_days=0），时间排序可靠。
         cutoff = (datetime.now(UTC) - timedelta(days=lookback_days)).isoformat()[:10]
         offset = 0
         while True:
@@ -287,9 +332,7 @@ class ArxivSource(BaseSource[Result]):
             if not page_results:  # 没有抓取结果
                 break
 
-            hit_past = _filter_page_results(
-                page_results, papers, skip_ids, cutoff, search.sort_by
-            )
+            hit_past = _filter_page_results(page_results, papers, skip_ids, cutoff, search.sort_by)
             if hit_past or len(page_results) < range_size:  # 边界条件
                 break
 

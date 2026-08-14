@@ -35,18 +35,27 @@
 
 | 你说 | 自动映射为 |
 |------|-----------|
-| 「启动 / 打开审阅页面」 | `uv run paper-research serve` |
-| 「抓取 / 更新论文」 | `uv run paper-research fetch` |
-| 「只抓某关键词」 | `uv run paper-research fetch -k <关键词>` |
-| 「全量回溯抓取」 | `uv run paper-research fetch -m historical` |
-| 「预览抓取（不写库）」 | `uv run paper-research fetch --dry-run` |
-| 「发送今日结果邮件」 | `uv run paper-research notify` |
-| 「查看状态 / 统计」 | `uv run paper-research status` |
+| 「启动 / 打开审阅页面」 | `paper serve`（或 `uv run paper-research serve`） |
+| 「抓取 / 更新论文」 | `paper fetch` |
+| 「只抓某关键词」 | `paper fetch -k <关键词>` |
+| 「全量回溯抓取」 | `paper fetch -m historical` |
+| 「预览抓取（不写库）」 | `paper fetch --dry-run` |
+| 「发送今日结果邮件」 | `paper notify` |
+| 「查看状态 / 统计」 | `paper status` |
 | 「注册 / 停止开机自启」 | `paper autostart` / `paper autostart off` |
 | 「初始化 / 重置 / 清除」 | 直接操作文件（删库 / 日志 / 示例，保留 `config`） |
 
-Skill 还内置**项目克隆、环境配置、全局命令安装**与**交互式配置流程**（一步步问答生成 / 更新 `config.yaml`）、
-常见问题排查指引。在 Claude Code 中直接说明需求即可，其余交给 Skill 处理。
+Skill 还内置**项目克隆、环境配置（uv）、全局命令安装、用户级 skill 安装**与
+**交互式配置流程**（一步步问答生成 / 更新 `config.yaml`）、常见问题排查指引。
+在 Claude Code 中直接说明需求即可，其余交给 Skill 处理。
+
+**安装到用户级（可选）**：把 skill 拷到 `~/.claude/skills/` 后，**任何目录**的对话都能触发，
+配合全局命令 `paper`（或 `uv run --project`）直接执行，无需 cd 进项目目录：
+
+```powershell
+Copy-Item -Recurse -Force ".\skills\paper-research" "$env:USERPROFILE\.claude\skills\"
+setx PAPER_RESEARCH_ROOT "<本项目绝对路径>"   # 供 skill 在任意目录定位项目（新终端生效）
+```
 
 ---
 
