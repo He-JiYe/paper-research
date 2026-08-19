@@ -4,17 +4,22 @@
 
 契约实现：
     - ``ArxivOptions.to_list()``：把 keywords 合并，产出 ``(keyword, arxiv.Search)`` 元组列表；
-    - ``_fetch(kw, options)``：解包 ``(keyword, Search)`` 执行一次 request，
-      按 ``skip_ids`` 与 ``lookback_days`` 过滤，批内相关性重排后截断；
+    - ``_fetch(kw, options)``：解包 ``(keyword, Search)`` 分页抓取，按 ``skip_ids``
+      过滤，按排序序（相关性/时间）抓满 ``max_results`` 篇未跳过即停；
     - ``adapt(items)``：把 ``arxiv.Result`` 转成 ``core.models.Record``，
       arxiv 特有字段（version/primary_category/doi 等）存入 ``raw_data``。
 
 排序/增量窗口约束（本模块 enforce，historical 判断在**下游**）：
-    - 相关性排序（relevance）无法做时间窗口截断（增量分页按 published 时间判断），
-      ``__post_init__`` 强制 ``lookback_days = 0``（等价历史全量搜索）；
-    - 时间排序（lastUpdatedDate / submittedDate）必须携带 ``lookback_days > 0``，
-      否则配置加载即报错（fail-fast）。
-    - 本模块只在有效排序 ≠ Relevance 时做批内相关性重排。
+    - 抓取只有两种模式：增量（``lookback_days > 0``，推荐 ``relevance``）与历史
+      （``lookback_days = 0``，忽略时间约束、直接取 max_results）；
+    - 任意排序（relevance / submittedDate / lastUpdatedDate）+ ``lookback_days > 0``：
+      查询内追加 ``submittedDate:[.. TO ..]`` 服务端过滤（2026-08 实证严格 0 越界），
+      按该排序序抓满 max_results 篇未跳过即停；``lastUpdatedDate`` 的窗口约束同为
+      submittedDate（API 无 updatedDate 服务端过滤，排序只决定窗口内顺序）；
+    - ``lookback_days = 0``（历史）：不追加任何日期约束，按排序序直接取 max_results；
+    - ``sort_order`` 仅支持 ``descending``（ascending 无合理增量语义，加载即报错）。
+    - 旧实现（客户端按 updated/published 截断 + 批内手动相关性重排）已移除：
+      日期窗口一律经 submittedDate 服务端过滤，相关性排序由 API 保证。
 """
 
 from __future__ import annotations
@@ -23,12 +28,10 @@ import asyncio
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from itertools import chain
 
 from arxiv import Client, Result, Search, SortCriterion, SortOrder
 
 from src.core.models import Record
-from src.core.text import relevance_score
 from src.network.base import BaseSource, FetchOptions
 from src.network.registry import REGISTRY
 
@@ -41,11 +44,9 @@ _ARXIV_PDF_URL = "https://arxiv.org/pdf/{}"
 
 _SORT_MAP = {
     "relevance": SortCriterion.Relevance,
-    "lastupdateddate": SortCriterion.LastUpdatedDate,
     "submitteddate": SortCriterion.SubmittedDate,
+    "lastupdateddate": SortCriterion.LastUpdatedDate,
 }
-
-AVG_PER_DAY = 100  # 预估每天最大数量
 
 
 def _extract_id(entry_id: str) -> tuple[str, int]:
@@ -65,32 +66,6 @@ def _is_skipped(sid: str, skip_ids) -> bool:
     return not sid or (skip_ids and sid in skip_ids)
 
 
-def _filter_page_results(
-    page_results: list[Result],
-    papers: list[Result],
-    skip_ids,
-    cutoff: str,
-    sort_by: SortCriterion,
-) -> bool:
-    """过滤单页结果：跳过已有/无法解析 ID，按窗口截断；返回是否已越过窗口（hit_past）。
-
-    窗口截断字段须与排序字段一致：按 lastUpdatedDate 排序时用 updated 判断，
-    否则「旧发布但近期更新」的论文会误触发 hit_past，漏掉其后的新论文。
-    """
-    for r in page_results:
-        sid, _ = _extract_id(r.entry_id)
-        if _is_skipped(sid, skip_ids):
-            continue
-        if sort_by == SortCriterion.LastUpdatedDate:
-            date_str = r.updated.strftime("%Y-%m-%d") if r.updated else ""
-        else:
-            date_str = r.published.strftime("%Y-%m-%d") if r.published else ""
-        if date_str < cutoff:  # 时间截断
-            return True
-        papers.append(r)
-    return False
-
-
 # ─── Arxiv 抓取参数 ──────────────────────────────────────────
 
 
@@ -101,8 +76,8 @@ class ArxivOptions(FetchOptions):
 
     # Search 相关参数（全局默认；可按 keyword 个性化覆盖）
     max_results: int = 20
-    sort_by: str = "relevance"
-    sort_order: str = "descending"
+    sort_by: str = "relevance"  # relevance | submittedDate | lastUpdatedDate（仅决定排序）
+    sort_order: str = "descending"  # 仅支持 descending（ascending 无合理语义）
 
     # Client 初始化参数
     page_size: int = 100
@@ -120,39 +95,26 @@ class ArxivOptions(FetchOptions):
         ``_validate_fetch_time``），避免运行期 ``to_list`` 才抛 KeyError/ValueError。
         arxiv API 单次请求上限 ``_ARXIV_MAX_RESULTS`` 条；page_size 放大到抓取范围。
 
-        排序与增量窗口的强制约束：
-        - 相关性排序无法做时间窗口截断（_fetch 增量分页按时间判断），
-          强制 ``lookback_days = 0``（消除 relevance + lookback>0 时的窗口静默截断）；
-        - 时间排序必须携带 ``lookback_days > 0``，否则"抓完整窗口"语义不成立，加载即报错；
-        - 时间排序不支持 ``ascending``：升序首篇最旧、必然触发窗口截断，增量会静默返回
-          0 篇（加载即报错，杜绝静默失效组合）。
+        排序与增量窗口的约束：
+        - ``lookback_days > 0``（增量）：任意排序都追加查询内 ``submittedDate`` 区间
+          服务端过滤（``_date_filter``，2026-08 实证严格 0 越界），按排序序取 Top-N；
+        - ``lookback_days = 0``（历史）：不追加日期约束，按排序序直接取 max_results
+          （submittedDate / lastUpdatedDate 仅决定排序，不再强制要求窗口）；
+        - ``sort_order`` 仅支持 ``descending``：ascending（相关性升序=最不相关优先、
+          时间升序=最旧优先）对增量/历史都没有合理语义，加载即报错。
         """
         if self.sort_by.lower() not in _SORT_MAP:
             raise ValueError(
-                f"未知 sort_by: {self.sort_by!r}（可选: relevance/lastUpdatedDate/submittedDate）"
+                f"未知 sort_by: {self.sort_by!r}（可选: relevance/submittedDate/lastUpdatedDate）"
             )
-        if self.sort_order.lower() not in ("ascending", "descending"):
-            raise ValueError(f"未知 sort_order: {self.sort_order!r}（可选: ascending/descending）")
+        if self.sort_order.lower() != "descending":
+            raise ValueError(f"sort_order 仅支持 descending（收到 {self.sort_order!r}）")
         self.sort_by = self.sort_by.lower()  # 与 sort_order 一致归一化，避免混合大小写外泄
         self.sort_order = self.sort_order.lower()  # to_list 的 SortOrder 按小写值匹配
 
-        if self.sort_by == "relevance":
-            self.lookback_days = 0  # 相关性排序强制全量（不做时间窗口）
-        elif self.lookback_days <= 0:
-            raise ValueError(
-                f"时间排序 {self.sort_by!r} 要求 lookback_days > 0，收到 {self.lookback_days}"
-            )
-        elif self.sort_order == "ascending":
-            raise ValueError(
-                f"时间排序 {self.sort_by!r} 不支持 sort_order=ascending"
-                "（增量窗口截断依赖降序结果，升序会静默返回 0 篇）"
-            )
-
-        if self.lookback_days > 0:  # 按时间排序，返回预估值
-            page_size = min((self.lookback_days + 1) * AVG_PER_DAY, _ARXIV_MAX_RESULTS)
-        else:
-            page_size = self.max_results * 2  # 按相关性排序，直接选择 max_results * 2
-
+        # 所有模式都按排序序取 Top-N（增量窗口在查询内过滤，无需整窗抓取）：
+        # page_size 只需 max_results*2 的 skip 余量
+        page_size = self.max_results * 2
         self.page_size = min(max(self.page_size, page_size), _ARXIV_MAX_RESULTS)
 
     def build_query(self, keyword: str, categories: list[str] | None = None) -> str:
@@ -168,12 +130,22 @@ class ArxivOptions(FetchOptions):
         cat_part = ""
         if categories:
             cat_part = "(" + " OR ".join(f"cat:{c}" for c in categories) + ") AND "
-        return f"{cat_part}all:{keyword}"
+
+        cutoff = ""
+        if self.lookback_days:
+            now = datetime.now(UTC).replace(second=0, microsecond=0)
+            start = (now - timedelta(days=self.lookback_days)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            cutoff = f" AND submittedDate:[{start:%Y%m%d%H%M} TO {now:%Y%m%d%H%M}]"
+        
+        return f"{cat_part}all:{keyword}{cutoff}"
 
     def to_list(self) -> list[tuple[str, Search]]:
         """把 keywords（core.KeywordItem）转成 ``(keyword, Search)`` 元组列表。
 
-        查询构造使用源级参数（max_results / sort_by / sort_order）。
+        查询构造使用源级参数（max_results / sort_by / sort_order）；
+        增量窗口（lookback_days>0）追加 ``submittedDate`` 区间过滤器。
         """
         out: list[tuple[str, Search]] = []
 
@@ -246,21 +218,25 @@ class ArxivSource(BaseSource[Result]):
     ) -> list[Result]:
         """解包 ``(keyword, Search)`` 抓取并过滤。
 
-        - ``lookback_days > 0``（增量）：按时间序分页抓**完整个窗口**内的数据，
-          批内按相关性重排后截断到 options.max_results；
-        - 否则（历史/搜索）：一次抓取，过滤 skip 后截断 options.max_results。
+        - ``lookback_days > 0``（增量）：查询内 ``submittedDate`` 区间服务端过滤
+          （严格性已实证），按排序序（relevance=相关性 / submittedDate=时间 /
+          lastUpdatedDate=更新时间）抓满 max_results 篇未跳过即停——提前停止，
+          无需整窗抓取，也无需客户端截断/重排；
+        - 否则（历史，``lookback_days = 0``）：一次抓取，过滤 skip 后截断
+          options.max_results（不追加日期约束）。
         """
-        keyword, search = kw
+        _, search = kw  # keyword 供下游过滤使用；本实现仅用 Search（相关性/窗口已由 API 保证）
         skip_ids = options.skip_ids
-        lookback_days = options.lookback_days
         range_size = search.max_results  # to_list 恒设 max_results=page_size
 
-        # 多关键词经 fetch() 共享 Client（限流节流跨关键词生效）；直接调 _fetch 时兜底自建
-        client = Client(
-            page_size=range_size,
-            delay_seconds=options.delay_seconds,
-            num_retries=options.num_retries,
-        )
+        # fetch() 已建共享 Client（限流节流跨关键词生效）；直接调 _fetch 时兜底自建
+        client = getattr(self, "_client", None)
+        if client is None:
+            client = Client(
+                page_size=range_size,
+                delay_seconds=options.delay_seconds,
+                num_retries=options.num_retries,
+            )
 
         def _run(search_obj: Search, offset: int) -> list[Result]:
             return list(client.results(search_obj, offset=offset))
@@ -269,22 +245,7 @@ class ArxivSource(BaseSource[Result]):
 
         papers: list[Result] = []
 
-        if lookback_days <= 0:
-            # 历史/搜索：一次抓 range_size 条，过滤 skip 后按 range_size 截断
-            results = await loop.run_in_executor(None, _run, search, 0)
-
-            for r in results:
-                sid, _ = _extract_id(r.entry_id)
-                if _is_skipped(sid, skip_ids):
-                    continue
-                papers.append(r)
-            return papers[: options.max_results]
-
-        # 增量：分页抓完 lookback 窗口
-        # 窗口截断字段与排序字段一致（LastUpdatedDate 用 updated，SubmittedDate 用 published）；
-        # 排序/窗口约束已由 __post_init__ 强制（时间排序必带 lookback_days>0 且必须降序，
-        # 相关性排序强制 lookback_days=0），时间排序可靠。
-        cutoff = (datetime.now(UTC) - timedelta(days=lookback_days)).isoformat()[:10]
+        # 抓取约束：如果抓取到 max_resutls（去重）或无返回结果则抓取结束
         offset = 0
         while True:
             page_search = Search(
@@ -300,24 +261,30 @@ class ArxivSource(BaseSource[Result]):
             if not page_results:  # 没有抓取结果
                 break
 
-            hit_past = _filter_page_results(page_results, papers, skip_ids, cutoff, search.sort_by)
-            if hit_past or len(page_results) < range_size:  # 边界条件
-                break
+            for r in page_results:
+                sid, _ = _extract_id(r.entry_id)
+                if _is_skipped(sid, skip_ids):
+                    continue
+                papers.append(r)
 
+            # 抓满 max_results 篇未跳过（提前停止），或窗口内结果不足一页（已抓完）
+            if len(papers) >= options.max_results or len(page_results) < range_size:
+                break
             offset += range_size
 
-        # 批内相关性重排，再截断到最终数量
-        if search.sort_by != SortCriterion.Relevance:
-            papers.sort(
-                key=lambda r: relevance_score(
-                    {"title": r.title or "", "abstract": r.summary or ""}, keyword
-                ),
-                reverse=True,
-            )
         return papers[: options.max_results]
 
     async def fetch(self, options: ArxivOptions) -> list[Record]:
-        return await super().fetch(options, max_concurrent=1)
+        """构建共享 Client（限流节流跨关键词生效），再走基类模板方法。"""
+        self._client = Client(
+            page_size=options.page_size,
+            delay_seconds=options.delay_seconds,
+            num_retries=options.num_retries,
+        )
+        try:
+            return await super().fetch(options, max_concurrent=1)
+        finally:
+            self._client = None
 
     # ── 数据源名称 ─────────────────────────────────────────────
 

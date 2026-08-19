@@ -117,9 +117,7 @@ def mock_settings() -> AppConfig:
             sources=[
                 SourceConfig(
                     source="arxiv",
-                    options=_arxiv_options(
-                        max_results=50, lookback_days=7, sort_by="lastUpdatedDate"
-                    ),
+                    options=_arxiv_options(max_results=50, lookback_days=7, sort_by="relevance"),
                 )
             ]
         ),

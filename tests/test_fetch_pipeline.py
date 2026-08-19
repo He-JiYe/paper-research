@@ -64,11 +64,11 @@ def _settings() -> AppConfig:
             sources=[
                 SourceConfig(
                     source="arxiv",
-                    options=ArxivOptions(max_results=7, lookback_days=2, sort_by="lastUpdatedDate"),
+                    options=ArxivOptions(max_results=7, lookback_days=2, sort_by="submittedDate"),
                 ),
                 SourceConfig(
                     source="arxiv",
-                    options=ArxivOptions(max_results=9, lookback_days=5, sort_by="lastUpdatedDate"),
+                    options=ArxivOptions(max_results=9, lookback_days=5, sort_by="submittedDate"),
                 ),
             ]
         ),

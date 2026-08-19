@@ -7,6 +7,9 @@
 - ``build_provider``：按 ``LLMConfig.provider`` 构造。
 
 Prompt 构造、few-shot、parse、fallback、重试逻辑均与 provider 无关（messages 格式统一）。
+
+DeepSeek 端点自动启用 JSON 输出（``response_format={"type": "json_object"}``，
+DeepSeek JSON Output，见 ``build_provider`` 的 ``_json_mode_for``）；ollama 不携带该参数。
 """
 
 import logging
@@ -54,6 +57,10 @@ class OpenAIProvider:
 
     client 惰性创建：api_key 为空时构造不抛错（PaperScorer._check_llm 会短路判定
     无 Key → fallback；此处的 check/chat 也会在无 key 时直接返回 False/None）。
+
+    json_mode=True 时 chat 请求携带 ``response_format={"type": "json_object"}``
+    （DeepSeek JSON Output 强制合法 JSON；该模式要求 prompt 含 "json" 字样，
+    见 scorer.llm 的 _SYSTEM_PROMPT，且 deepseek-reasoner 不支持该模式）。
     """
 
     requires_key = True
@@ -66,6 +73,7 @@ class OpenAIProvider:
         api_key: str,
         temperature: float = 0.3,
         max_tokens: int = 2000,
+        json_mode: bool = False,
     ):
         from openai import OpenAI
 
@@ -75,6 +83,7 @@ class OpenAIProvider:
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.json_mode = json_mode
         self._client_obj = None  # 惰性缓存客户端，避免 check/chat 每次重建（省握手开销）
 
     def _client(self):
@@ -109,16 +118,20 @@ class OpenAIProvider:
         if not self.api_key:
             return None
         try:
-            resp = self._client().chat.completions.create(
-                model=self.model,
-                messages=[
+            kwargs: dict = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                timeout=_CHAT_TIMEOUT,  # SDK 默认 600s，挂起调用会阻塞评分线程数分钟
-            )
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "timeout": _CHAT_TIMEOUT,  # SDK 默认 600s，挂起调用会阻塞评分线程数分钟
+            }
+            if self.json_mode:
+                # DeepSeek JSON Output：强制合法 JSON，parse 层不再依赖 LLM 自觉
+                kwargs["response_format"] = {"type": "json_object"}
+            resp = self._client().chat.completions.create(**kwargs)
             return resp.choices[0].message.content
         except Exception as e:
             logger.warning("LLM API call failed: %s", e)
@@ -233,6 +246,18 @@ class OllamaProvider:
             return None
 
 
+def _json_mode_for(llm) -> bool:
+    """判定是否启用 DeepSeek JSON 输出（``response_format={"type": "json_object"}``）。
+
+    规则：provider 为 ``deepseek`` 或 api_base 指向 deepseek 端点（如
+    ``https://api.deepseek.com``，含 provider=openai 的写法）即启用。
+
+    注意：DeepSeek JSON Output 要求 prompt 含 "json" 字样（_SYSTEM_PROMPT 已满足），
+    且 deepseek-reasoner 不支持该模式。
+    """
+    return llm.provider.lower() == "deepseek" or "deepseek" in (llm.api_base or "").lower()
+
+
 def build_provider(llm) -> ChatProvider:
     """按 ``LLMConfig``（provider/model/api_base/api_key/...）构造 provider。"""
     if llm.provider.lower() == "ollama":
@@ -249,4 +274,5 @@ def build_provider(llm) -> ChatProvider:
         api_key=llm.api_key,
         temperature=llm.temperature,
         max_tokens=llm.max_tokens,
+        json_mode=_json_mode_for(llm),
     )

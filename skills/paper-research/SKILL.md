@@ -142,15 +142,21 @@ setx EMAIL_PASSWORD "smtp-auth-code"
 
 1. **数据源（必填）**：目前仅注册 `arxiv`，默认 `arxiv`。每源参数：
    `max_results`（默认 `20`）、`sort_by`（默认 `relevance`，可选
-   `relevance | lastUpdatedDate | submittedDate`）、`sort_order`（默认 `descending`）、
+   `relevance | submittedDate | lastUpdatedDate`）、`sort_order`（固定 `descending`，ascending 加载即报错）、
    `lookback_days`（默认 `0` = 全量）、`delay_seconds`（默认 `3`，arXiv 限流，别调太小）、
    `num_retries`（默认 `3`）、`page_size`（默认自动派生，一般不用写）。
-   非法值在加载/构建时直接报错（fail-fast）。排序约束：
-   - `relevance` 强制 `lookback_days = 0`（相关性排序无法做时间窗口截断，即全量）；
-   - 时间排序（`lastUpdatedDate` / `submittedDate`）必须 `lookback_days > 0`，且**不支持
-     `sort_order: ascending`**（升序首篇最旧必触发窗口截断、静默返回 0 篇），违者加载即报错。
-   - **增量抓取**需显式配 `sort_by: lastUpdatedDate` + `lookback_days: N`（抓最近 N 天，
-     批内再按相关性重排）；否则默认 relevance 全量（≈ historical）。
+   非法值在加载/构建时直接报错（fail-fast）。排序/模式约束：
+   - 抓取只有两种模式：增量（`lookback_days > 0`）与历史（`lookback_days = 0`）。
+   - 增量模式任意排序（`relevance | submittedDate | lastUpdatedDate`）都追加查询内
+     `submittedDate:[.. TO ..]` 服务端过滤（2026-08 实证严格 0 越界），按该排序序
+     抓满 max_results 即停；`lastUpdatedDate` 的窗口约束同为 submittedDate
+     （API 无 updatedDate 服务端过滤，排序只决定窗口内顺序）。
+   - 历史模式（`lookback_days = 0`）不追加任何日期约束，按排序序直接取 max_results。
+   - `sort_order` 仅支持 `descending`（ascending 无合理增量语义，加载即报错）。
+   - 旧实现（时间排序 + 客户端截断 + 手动相关性重排）已移除。
+   - **增量抓取**推荐 `sort_by: relevance` + `lookback_days: N`（抓最近 N 天、API 直接按
+     相关性排序）；也可 `sort_by: submittedDate/lastUpdatedDate` + `lookback_days: N`；
+     默认 relevance 全量（≈ historical）。
 2. **关键词（必填，至少 1 个）**：问「要追踪哪些关键词（逗号分隔）」。对每个关键词问
    「限定 arXiv 分类？（逗号分隔，如 cs.CV, cs.LG）」，不填为空；`active` 一律 `true`。
 3. **LLM 评分（可选，默认 deepseek）**：不配则自动走关键词相关性 fallback，流程不中断。
@@ -276,7 +282,7 @@ Start-Process -FilePath (Join-Path $pyhome "pythonw.exe") -ArgumentList "`"$root
 - **未配 Zotero**：`serve` 启动打印警告，审阅页面正常，仅「导入 Zotero」不可用。
 - **unknown 数据源**：`fetch.sources[*].source` 填了未注册名会在 `load_settings` 抛 ValueError 启动即失败——只填 `arxiv`。
 - **scheduler.fetch_time 格式**：必须 `HH:MM`（如 `"08:30"`），非法配置加载即报错。
-- **时间排序 + `sort_order: ascending`**：加载即报错（会静默返回 0 篇），时间排序请用默认 `descending`。
+- **`sort_order: ascending`**：加载即报错（相关性升序=最不相关优先、时间升序=最旧优先，无合理增量语义），请用默认 `descending`。
 - **邮件配置键名**：必须 `from_addr` / `to_addr`（不是 `from` / `to`），写错会被静默忽略导致邮件发不出去。
 - **examples 文件**：被 .gitignore 忽略，仅本地占位，不要提交。
 - **批量导入移除**：前端批量导入面板每条选中 item 有 ✕ 按钮，可直接从选中列表移除（同步取消卡片勾选）。

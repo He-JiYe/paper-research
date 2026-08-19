@@ -166,7 +166,7 @@ class TestOptionsRegistry:
             {
                 "keywords": [{"keyword": "k", "categories": ["cs.LG"], "active": True}],
                 "max_results": 99,
-                "sort_by": "lastUpdatedDate",  # 时间排序才允许 lookback_days>0
+                "sort_by": "submittedDate",  # 时间排序/relevance 均可带 lookback_days>0
                 "lookback_days": 7,
                 "skip_ids": {"x"},
                 "unrelated": 1,

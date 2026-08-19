@@ -24,7 +24,10 @@ fetch:
     - source: arxiv
       max_results: 20
       lookback_days: 3
-      sort_by: lastUpdatedDate   # relevance | lastUpdatedDate | submittedDate（增量/历史由下游按模式覆盖）
+      # relevance | submittedDate | lastUpdatedDate（仅决定排序顺序）；
+      # 增量（lookback_days>0）统一追加查询内 submittedDate 窗口（服务端过滤），
+      # 历史（lookback_days=0）不加日期约束、直接取 max_results；推荐 relevance + lookback
+      sort_by: relevance
 
 # 关键词：全源共享，固定形式 keyword/categories/active（无每词个性化）
 keywords:

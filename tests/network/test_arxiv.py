@@ -1,5 +1,6 @@
 """Arxiv API 客户端测试（基于 arxiv 库）"""
 
+import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -8,7 +9,7 @@ import pytest
 from arxiv import SortCriterion
 from src.core.models import KeywordItem
 from src.core.text import relevance_score
-from src.network.source.arxiv import AVG_PER_DAY, ArxivOptions, ArxivSource
+from src.network.source.arxiv import ArxivOptions, ArxivSource
 
 # ─── 辅助：构建 mock Result ──────────────────────────────
 
@@ -143,15 +144,16 @@ class TestToList:
             assert search.sort_by == SortCriterion.Relevance  # 一律源级 sort_by
 
     def test_post_init_page_size(self):
-        """__post_init__ 按模式计算 page_size（历史 max_results*2，增量覆盖窗口）"""
-        # 历史（相关性排序强制 lookback=0）：至少 max_results*2
+        """__post_init__：所有模式都按排序序取 Top-N，page_size = max(默认, max_results*2)"""
+        # 历史（relevance，lookback=0）
         opts = ArxivOptions(max_results=50, page_size=10)
         assert opts.page_size == min(max(10, 50 * 2), 2000)
-        # 增量（时间排序）：至少 (lookback+1)*AVG_PER_DAY
-        opts = ArxivOptions(
-            max_results=50, page_size=10, sort_by="lastUpdatedDate", lookback_days=3
-        )
-        assert opts.page_size == min(max(10, 4 * AVG_PER_DAY), 2000)
+        # 增量（relevance + lookback）
+        opts = ArxivOptions(max_results=50, page_size=10, sort_by="relevance", lookback_days=3)
+        assert opts.page_size == min(max(10, 50 * 2), 2000)
+        # 增量（submittedDate + lookback）：同样 max_results*2（查询内窗口，无需整窗预估）
+        opts = ArxivOptions(max_results=50, page_size=10, sort_by="submittedDate", lookback_days=3)
+        assert opts.page_size == min(max(10, 50 * 2), 2000)
 
     def test_invalid_sort_by_raises(self):
         """非法 sort_by 加载即报错（fail-fast，避免 to_list 才 KeyError）"""
@@ -159,47 +161,86 @@ class TestToList:
             ArxivOptions(sort_by="lastupdated")  # 漏写 date
 
     def test_invalid_sort_order_raises(self):
-        """非法 sort_order 加载即报错"""
+        """非法/ascending sort_order 加载即报错（ascending 无合理增量语义）"""
         with pytest.raises(ValueError, match="sort_order"):
             ArxivOptions(sort_order="sideways")
+        with pytest.raises(ValueError, match="sort_order"):
+            ArxivOptions(sort_order="ascending")
+        with pytest.raises(ValueError, match="sort_order"):
+            ArxivOptions(sort_order="Ascending")
 
     def test_sort_order_normalized_lower(self):
         """sort_order 归一化为小写（SortOrder 按小写值匹配）"""
         assert ArxivOptions(sort_order="DESCENDING").sort_order == "descending"
 
     def test_valid_sort_params_accept_any_case(self):
-        """合法 sort_by 大小写不敏感（config 用 lastUpdatedDate，测试用 submittedDate）"""
-        ArxivOptions(sort_by="lastUpdatedDate", lookback_days=1)
+        """合法 sort_by / sort_order 大小写不敏感（config 用 submittedDate，测试用小写）"""
         ArxivOptions(sort_by="submittedDate", lookback_days=1)
+        ArxivOptions(sort_by="lastUpdatedDate", lookback_days=1)
         ArxivOptions(sort_by="Relevance")
-        ArxivOptions(sort_order="Ascending")
+        ArxivOptions(sort_by="SUBMITTEDDATE", lookback_days=1)
+        ArxivOptions(sort_order="DESCENDING")
 
-    def test_relevance_forces_lookback_zero(self):
-        """相关性排序无法做时间窗口截断，强制 lookback_days=0（消除窗口静默截断）"""
+    def test_relevance_allows_lookback(self):
+        """相关性排序 + 增量窗口：查询内 submittedDate 服务端过滤（不再强制 lookback=0）"""
         opts = ArxivOptions(sort_by="relevance", lookback_days=7)
+        assert opts.lookback_days == 7
+
+    def test_time_sorts_allow_zero_lookback(self):
+        """时间排序 + lookback=0（历史模式）：合法，不追加日期约束，直接取 max_results"""
+        opts = ArxivOptions(sort_by="submittedDate")
         assert opts.lookback_days == 0
+        assert opts._date_filter() == ""
+        opts2 = ArxivOptions(sort_by="lastUpdatedDate")
+        assert opts2._date_filter() == ""
 
-    def test_time_sort_requires_lookback(self):
-        """时间排序必须携带增量窗口（lookback_days>0），否则加载即报错（fail-fast）"""
-        with pytest.raises(ValueError, match="lookback_days"):
-            ArxivOptions(sort_by="lastUpdatedDate")  # lookback 默认 0
-
-    def test_time_sort_rejects_ascending(self):
-        """时间排序 + 升序会静默返回 0 篇（升序首篇最旧必触发窗口截断），加载即报错"""
-        with pytest.raises(ValueError, match="ascending"):
-            ArxivOptions(sort_by="lastUpdatedDate", lookback_days=3, sort_order="ascending")
-        with pytest.raises(ValueError, match="ascending"):
+    def test_ascending_rejected_for_all_sorts(self):
+        """ascending 对所有排序都无合理增量语义，加载即报错"""
+        with pytest.raises(ValueError, match="sort_order"):
             ArxivOptions(sort_by="submittedDate", lookback_days=3, sort_order="ascending")
-        # 相关性排序不受影响（不做窗口截断）
-        ArxivOptions(sort_by="relevance", sort_order="ascending")
+        with pytest.raises(ValueError, match="sort_order"):
+            ArxivOptions(sort_by="relevance", sort_order="ascending")
+
+    # ── 查询内日期窗口（_date_filter / to_list 拼装）────────────
+
+    def test_no_date_filter_historical(self):
+        """历史（lookback=0）：不追加日期过滤器"""
+        assert ArxivOptions(sort_by="relevance")._date_filter() == ""
+
+    def test_date_filter_relevance_windowed(self):
+        """relevance + lookback>0：追加 submittedDate 区间（YYYYMMDDHHMM 分钟粒度）"""
+        f = ArxivOptions(sort_by="relevance", lookback_days=7)._date_filter()
+        assert re.fullmatch(r" AND submittedDate:\[\d{12} TO \d{12}\]", f)
+
+    def test_date_filter_submitteddate_windowed(self):
+        """submittedDate 排序 + lookback>0：同样追加 submittedDate 区间"""
+        f = ArxivOptions(sort_by="submittedDate", lookback_days=3)._date_filter()
+        assert re.fullmatch(r" AND submittedDate:\[\d{12} TO \d{12}\]", f)
+
+    def test_date_filter_lastupdateddate_windowed(self):
+        """lastUpdatedDate + lookback>0：同样追加 submittedDate 区间（API 唯一日期过滤器，
+        排序只决定窗口内顺序）"""
+        f = ArxivOptions(sort_by="lastUpdatedDate", lookback_days=3)._date_filter()
+        assert re.fullmatch(r" AND submittedDate:\[\d{12} TO \d{12}\]", f)
+
+    def test_to_list_appends_date_filter_for_windowed_sorts(self):
+        """to_list 对增量（lookback>0）把日期过滤器拼进查询串；历史（lookback=0）不拼"""
+        opts = ArxivOptions(keywords=_kw("test"), sort_by="relevance", lookback_days=7)
+        query = opts.to_list()[0][1].query
+        assert re.search(r" AND submittedDate:\[\d{12} TO \d{12}\]$", query)
+        opts2 = ArxivOptions(keywords=_kw("test"), sort_by="relevance")
+        assert "submittedDate" not in opts2.to_list()[0][1].query
+        opts3 = ArxivOptions(keywords=_kw("test"), sort_by="lastUpdatedDate", lookback_days=7)
+        assert re.search(r" AND submittedDate:\[\d{12} TO \d{12}\]$", opts3.to_list()[0][1].query)
 
 
 class TestSingleFetch:
     """测试单关键词 _fetch（(keyword, Search) 元组 + options 双参数）"""
 
     @pytest.mark.asyncio
-    async def test_incremental_mode(self):
-        """增量模式：过滤超出 lookback_days 的论文"""
+    async def test_incremental_mode_no_client_cutoff(self):
+        """增量模式：窗口在查询内（submittedDate 服务端过滤），客户端不再按日期截断，
+        旧发布样本也原样透传（窗口保证由 API 负责）"""
         mock_results = [
             _make_mock_result("2401.00001", published="2024-01-01"),
             _make_mock_result("2401.00002", published="2024-01-02"),
@@ -208,7 +249,7 @@ class TestSingleFetch:
             keywords=_kw("test"),
             max_results=25,
             lookback_days=7,
-            sort_by="lastUpdatedDate",
+            sort_by="submittedDate",
         )
 
         with patch("src.network.source.arxiv.Client") as mock_client_cls:
@@ -218,8 +259,9 @@ class TestSingleFetch:
 
             papers = await ArxivSource()._fetch(opts.to_list()[0], opts)
 
-            # 样本 published=2024-01-01，远早于 7 天内（当前时间约为 2026 年），所以被过滤
-            assert len(papers) == 0
+            # 查询串带日期窗口；样本全部透传（无客户端截断），不足一页即停
+            assert "submittedDate" in opts.to_list()[0][1].query
+            assert len(papers) == 2
 
     @pytest.mark.asyncio
     async def test_historical_mode(self):
@@ -237,6 +279,25 @@ class TestSingleFetch:
 
             papers = await ArxivSource()._fetch(opts.to_list()[0], opts)
 
+            assert len(papers) == 2
+
+    @pytest.mark.asyncio
+    async def test_historical_time_sort(self):
+        """历史模式 + 时间排序（lookback=0）：合法，不追加日期约束，按排序序取 max_results"""
+        mock_results = [
+            _make_mock_result("2401.00001"),
+            _make_mock_result("2401.00002"),
+        ]
+        opts = ArxivOptions(keywords=_kw("test"), max_results=50, sort_by="submittedDate")
+
+        with patch("src.network.source.arxiv.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.results.return_value = mock_results
+            mock_client_cls.return_value = mock_client
+
+            papers = await ArxivSource()._fetch(opts.to_list()[0], opts)
+
+            assert "submittedDate" not in opts.to_list()[0][1].query  # 无窗口约束
             assert len(papers) == 2
 
     @pytest.mark.asyncio
@@ -319,7 +380,7 @@ class TestFetch:
 
 
 class TestIncrementalPagination:
-    """增量模式：分页抓完 lookback 窗口，按相关性重排后截断"""
+    """增量模式：查询内窗口（服务端过滤），按排序序抓满 max_results 篇未跳过即停"""
 
     @staticmethod
     def _days_ago(days: int) -> str:
@@ -327,40 +388,39 @@ class TestIncrementalPagination:
         return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
 
     @pytest.mark.asyncio
-    async def test_stops_at_window_end(self):
-        """第 1 页内出现超窗 → 停止，只留窗口内"""
-        in_window = [
+    async def test_stops_when_page_short(self):
+        """窗口内结果不足一页 → 停止翻页（超窗样本由服务端过滤，客户端不截断）"""
+        page1 = [
             _make_mock_result("2401.00001", published=self._days_ago(1)),
             _make_mock_result("2401.00002", published=self._days_ago(2)),
+            _make_mock_result("2401.00003", published=self._days_ago(30)),
         ]
-        past = _make_mock_result("2401.00003", published=self._days_ago(30))
         opts = ArxivOptions(
-            keywords=_kw("test"), max_results=50, lookback_days=7, sort_by="lastUpdatedDate"
+            keywords=_kw("test"), max_results=50, lookback_days=7, sort_by="submittedDate"
         )
         with patch("src.network.source.arxiv.Client") as mock_client_cls:
             mock_client = MagicMock()
-            mock_client.results.return_value = in_window + [past]
+            mock_client.results.return_value = page1
             mock_client_cls.return_value = mock_client
 
             papers = await ArxivSource()._fetch(opts.to_list()[0], opts)
 
-        assert {r.entry_id for r in papers} == {r.entry_id for r in in_window}
-        assert mock_client.results.call_count == 1  # 首页即遇超窗，不再翻页
+        assert len(papers) == 3
+        assert mock_client.results.call_count == 1  # 不足一页即停，不再翻页
 
     @pytest.mark.asyncio
-    async def test_requests_next_page_when_window_not_exceeded(self):
-        """第 1 页满 range_size 且全在窗口 → offset 增加翻第 2 页，抓全窗口"""
+    async def test_requests_next_page_when_not_filled(self):
+        """首页未抓满 max_results（且页满）→ 翻第 2 页凑满后截断"""
         opts = ArxivOptions(
-            keywords=_kw("test"), max_results=1000, lookback_days=7, sort_by="lastUpdatedDate"
+            keywords=_kw("test"), max_results=2500, lookback_days=7, sort_by="submittedDate"
         )
-        range_size = opts.to_list()[0][1].max_results  # = min(8*AVG_PER_DAY, 2000)
+        range_size = opts.to_list()[0][1].max_results  # min(max(100, 5000), 2000) = 2000
         page1 = [
             _make_mock_result(f"2401.{i:05d}", published=self._days_ago(1))
             for i in range(1, range_size + 1)
         ]
         page2 = [
-            _make_mock_result("2501.00001", published=self._days_ago(2)),
-            _make_mock_result("2501.00002", published=self._days_ago(30)),
+            _make_mock_result(f"2501.{i:05d}", published=self._days_ago(1)) for i in range(1, 601)
         ]
         with patch("src.network.source.arxiv.Client") as mock_client_cls:
             mock_client = MagicMock()
@@ -369,34 +429,86 @@ class TestIncrementalPagination:
 
             papers = await ArxivSource()._fetch(opts.to_list()[0], opts)
 
-        # 第 1 页全在窗口 → 翻第 2 页抓完窗口
+        # 第 1 页 2000 篇未凑满 2500 → 翻第 2 页，凑满后截断
         assert mock_client.results.call_count == 2
-        assert len(papers) == range_size + 1
+        assert len(papers) == 2500
 
     @pytest.mark.asyncio
-    async def test_truncates_to_max_results_after_relevance_sort(self):
-        """窗口内多于 max_results → 按相关性重排后截断"""
+    async def test_relevance_windowed_stops_after_max_results(self):
+        """relevance + lookback：API 已按相关性降序，抓满 max_results 篇未跳过即停
+        （不抓完整窗口 —— 增量路径主要提速点；超窗样本由服务端过滤，客户端不再截断）"""
         opts = ArxivOptions(
-            keywords=_kw("test-time adaptation"),
-            max_results=1,
-            lookback_days=7,
-            sort_by="lastUpdatedDate",
+            keywords=_kw("test"), max_results=2, lookback_days=7, sort_by="relevance"
         )
-        matched = _make_mock_result(
-            "2401.00001", title="test-time adaptation for LLMs", published=self._days_ago(1)
-        )
-        unrelated = _make_mock_result(
-            "2401.00002", title="unrelated title", published=self._days_ago(2)
-        )
+        range_size = opts.to_list()[0][1].max_results  # relevance → max_results*2 = 4
+        page1 = [
+            _make_mock_result(f"2401.{i:05d}", published=self._days_ago(1))
+            for i in range(1, range_size + 1)
+        ]
         with patch("src.network.source.arxiv.Client") as mock_client_cls:
             mock_client = MagicMock()
-            mock_client.results.return_value = [unrelated, matched]  # API 返回序：unrelated 在前
+            mock_client.results.return_value = page1
             mock_client_cls.return_value = mock_client
 
             papers = await ArxivSource()._fetch(opts.to_list()[0], opts)
 
-        assert len(papers) == 1
-        assert papers[0].entry_id == matched.entry_id  # 相关性重排后 matched 胜出
+        # 查询串已带日期窗口
+        assert "submittedDate" in opts.to_list()[0][1].query
+        assert mock_client.results.call_count == 1  # 首页即抓满，不再翻页
+        assert len(papers) == 2
+
+    @pytest.mark.asyncio
+    async def test_relevance_windowed_pages_past_skipped(self):
+        """skip 覆盖整个首页 → 继续翻页直到 max_results 篇未跳过"""
+        opts = ArxivOptions(
+            keywords=_kw("test"),
+            max_results=3,
+            lookback_days=7,
+            sort_by="relevance",
+        )
+        range_size = opts.to_list()[0][1].max_results  # max(默认100, 3*2) = 100
+        page1 = [
+            _make_mock_result(f"2401.{i:05d}", published=self._days_ago(1))
+            for i in range(1, range_size + 1)
+        ]
+        page2 = [
+            _make_mock_result(f"2501.{i:05d}", published=self._days_ago(1)) for i in range(1, 4)
+        ]
+        opts.skip_ids = {f"2401.{i:05d}" for i in range(1, range_size + 1)}  # 首页全部已入库
+        with patch("src.network.source.arxiv.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.results.side_effect = [page1, page2]
+            mock_client_cls.return_value = mock_client
+
+            papers = await ArxivSource()._fetch(opts.to_list()[0], opts)
+
+        # 首页 100 篇全部 skip → 翻第 2 页凑满 3 篇未跳过
+        assert mock_client.results.call_count == 2
+        assert len(papers) == 3
+        assert all(p.entry_id.startswith("http://arxiv.org/abs/2501.") for p in papers)
+
+    @pytest.mark.asyncio
+    async def test_lastupdateddate_windowed_stops_after_max_results(self):
+        """lastUpdatedDate + lookback：查询带 submittedDate 窗口（API 唯一日期过滤器），
+        按更新时间排序抓满即停"""
+        opts = ArxivOptions(
+            keywords=_kw("test"), max_results=2, lookback_days=7, sort_by="lastUpdatedDate"
+        )
+        range_size = opts.to_list()[0][1].max_results  # max(默认100, 2*2) = 100
+        page1 = [
+            _make_mock_result(f"2401.{i:05d}", published=self._days_ago(1))
+            for i in range(1, range_size + 1)
+        ]
+        with patch("src.network.source.arxiv.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.results.return_value = page1
+            mock_client_cls.return_value = mock_client
+
+            papers = await ArxivSource()._fetch(opts.to_list()[0], opts)
+
+        assert re.search(r" AND submittedDate:\[\d{12} TO \d{12}\]$", opts.to_list()[0][1].query)
+        assert mock_client.results.call_count == 1
+        assert len(papers) == 2
 
 
 class TestRelevanceSortKey:

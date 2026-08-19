@@ -81,10 +81,10 @@ class TestPydanticModels:
     def test_source_config_collects_flat_params(self):
         """config.yaml 平铺写法（source 外同级键）→ 收集进 options dict"""
         sc = SourceConfig.model_validate(
-            {"source": "arxiv", "max_results": 10, "lookback_days": 3, "sort_by": "lastUpdatedDate"}
+            {"source": "arxiv", "max_results": 10, "lookback_days": 3, "sort_by": "submittedDate"}
         )
         assert sc.source == "arxiv"
-        assert sc.options == {"max_results": 10, "lookback_days": 3, "sort_by": "lastUpdatedDate"}
+        assert sc.options == {"max_results": 10, "lookback_days": 3, "sort_by": "submittedDate"}
 
     def test_server_config_defaults(self):
         cfg = ServerConfig()

@@ -39,6 +39,31 @@ def test_openai_chat_no_key_returns_none():
     assert p.chat("s", "u") is None
 
 
+def test_openai_chat_json_mode_sends_response_format():
+    """json_mode=True 时请求携带 response_format={"type":"json_object"}（DeepSeek JSON Output）"""
+    p = OpenAIProvider(
+        model="m", api_base="https://api.deepseek.com", api_key="sk-test", json_mode=True
+    )
+    resp = MagicMock()
+    resp.choices[0].message.content = '{"summary": "ok"}'
+    with patch("src.scorer.provider.OpenAIProvider._client", return_value=MagicMock()) as client:
+        client.return_value.chat.completions.create.return_value = resp
+        assert p.chat("s", "u") == '{"summary": "ok"}'
+    kwargs = client.return_value.chat.completions.create.call_args.kwargs
+    assert kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_openai_chat_default_no_response_format():
+    """默认 json_mode=False 时不携带 response_format（兼容不支持该参数的端点）"""
+    p = _openai()
+    resp = MagicMock()
+    resp.choices[0].message.content = "ok"
+    with patch("src.scorer.provider.OpenAIProvider._client", return_value=MagicMock()) as client:
+        client.return_value.chat.completions.create.return_value = resp
+        p.chat("s", "u")
+    assert "response_format" not in client.return_value.chat.completions.create.call_args.kwargs
+
+
 def test_openai_check_success():
     p = _openai()
     with patch("src.scorer.provider.OpenAIProvider._client", return_value=MagicMock()) as client:
@@ -210,3 +235,21 @@ def test_build_provider_deepseek_default_base():
     """deepseek 未显式指定 api_base 时应回退 deepseek 端点。"""
     p = build_provider(LLMConfig(provider="deepseek"))
     assert p.api_base == "https://api.deepseek.com"
+
+
+def test_build_provider_deepseek_enables_json_mode():
+    """provider=deepseek → 自动启用 DeepSeek JSON 输出"""
+    p = build_provider(LLMConfig(provider="deepseek"))
+    assert p.json_mode is True
+
+
+def test_build_provider_deepseek_base_enables_json_mode():
+    """provider=openai 但 api_base 指向 deepseek 端点 → 仍启用 JSON 输出（实际 config 写法）"""
+    p = build_provider(LLMConfig(provider="openai", api_base="https://api.deepseek.com"))
+    assert p.json_mode is True
+
+
+def test_build_provider_other_base_disables_json_mode():
+    """非 deepseek 端点（openai/vllm 等）默认不启用 JSON 输出"""
+    p = build_provider(LLMConfig(provider="openai", api_base="https://api.openai.com/v1"))
+    assert p.json_mode is False

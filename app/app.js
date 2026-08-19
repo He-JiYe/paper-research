@@ -250,9 +250,11 @@ function buildPaperCard(p) {
         : '<span>' + escapeHtml(p.title || '') + '</span>';
     var pct = Math.round(score * 100);
     var published = (p.published || '').slice(0, 10);  // YYYY-MM-DD
+    var updated = (p.updated || '').slice(0, 10)
     var fetchDate = p.fetch_date || '';
     var abstract = (p.abstract || '').slice(0, 500);
     var suggested = p.suggested_short_title || '';
+    var authors = (p.authors || '').split(',').map(s => s.trim()).filter(Boolean);
 
     var html = '';
     html += '<div class="paper-card state-' + markCls + '" id="card-' + escapeHtml(cardKey) + '"';
@@ -286,9 +288,11 @@ function buildPaperCard(p) {
 
     html += '<div class="card-body">';
     html += '<div class="card-meta-chips">';
-    html += '<span class="meta-chip" title="' + escapeHtml(p.authors || '') + '"><span class="chip-label">作者</span>' + escapeHtml(p.authors || '') + '</span>';
+    html += '<span class="meta-chip" title="' + escapeHtml(p.authors || '') + '"><span class="chip-label">作者</span>' +
+    escapeHtml(authors.length > 3 ? authors.slice(0,3).join(', ') + ' ...': p.authors || '') + '</span>';
     html += '<span class="meta-chip" title="' + escapeHtml(p.keyword_match || '') + '"><span class="chip-label">关键词</span>' + escapeHtml(p.keyword_match || '') + '</span>';
     html += '<span class="meta-chip"><span class="chip-label">发布于</span>' + escapeHtml(published) + '</span>';
+    html += '<span class="meta-chip"><span class="chip-label">更新于</span>' + escapeHtml(updated) + '</span>';
     html += '<span class="meta-chip"><span class="chip-label">来源</span>' + escapeHtml(source + ' / ' + sourceId) + '</span>';
     html += '</div>';
     if (p.llm_summary) html += '<div class="card-ai-summary"><span class="ai-badge">✦ AI 审阅</span><div>' + escapeHtml(p.llm_summary) + '</div></div>';
