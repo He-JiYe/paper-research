@@ -237,34 +237,6 @@ class ArxivSource(BaseSource[Result]):
             )
         return records
 
-    # ── 批量抓取（覆盖模板方法：多关键词共享 Client + 错峰启动）────────
-
-    async def fetch(self, options: ArxivOptions) -> list[Record]:
-        """多关键词抓取（覆盖 BaseSource 模板方法）。
-
-        两个 arXiv 限流防护：
-        - 多关键词共享同一个 ``Client``：``delay_seconds`` 的实例级节流
-          （``_last_request_dt``）跨关键词生效，分页请求不再互相击穿；
-        - 各关键词首个请求按 ``delay_seconds`` 错峰启动：避免 t=0 时 N 个
-          关键词并发发出首请求（首请求不受实例级节流保护）。
-        """
-        self._client = Client(
-            page_size=options.page_size,
-            delay_seconds=options.delay_seconds,
-            num_retries=options.num_retries,
-        )
-        try:
-            tasks = []
-            kws = options.to_list()
-            for kw in kws:
-                tasks.append(asyncio.create_task(self._try_fetch(kw, options)))
-                if len(tasks) < len(kws):
-                    await asyncio.sleep(options.delay_seconds)  # 错峰：间隔一个节流周期
-            lists = await asyncio.gather(*tasks)
-        finally:
-            self._client = None
-        return list(chain.from_iterable(lists))
-
     # ── 单关键词抓取 ────────────────────────────────────────────
 
     async def _fetch(
@@ -284,14 +256,10 @@ class ArxivSource(BaseSource[Result]):
         range_size = search.max_results  # to_list 恒设 max_results=page_size
 
         # 多关键词经 fetch() 共享 Client（限流节流跨关键词生效）；直接调 _fetch 时兜底自建
-        client = (
-            self._client
-            if getattr(self, "_client", None) is not None
-            else Client(
-                page_size=range_size,
-                delay_seconds=options.delay_seconds,
-                num_retries=options.num_retries,
-            )
+        client = Client(
+            page_size=range_size,
+            delay_seconds=options.delay_seconds,
+            num_retries=options.num_retries,
         )
 
         def _run(search_obj: Search, offset: int) -> list[Result]:
@@ -347,6 +315,9 @@ class ArxivSource(BaseSource[Result]):
                 reverse=True,
             )
         return papers[: options.max_results]
+
+    async def fetch(self, options: ArxivOptions) -> list[Record]:
+        return await super().fetch(options, max_concurrent=1)
 
     # ── 数据源名称 ─────────────────────────────────────────────
 

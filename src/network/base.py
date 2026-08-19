@@ -122,6 +122,7 @@ class BaseSource(ABC, Generic[RawResult]):
     async def fetch(
         self,
         options: FetchOptions,
+        max_concurrent: int = 3
     ) -> list[Record]:
         """异步遍历不同关键词 → adapt。
 
@@ -133,7 +134,13 @@ class BaseSource(ABC, Generic[RawResult]):
         Returns:
             论文元数据列表（不去重）
         """
-        lists = await asyncio.gather(*[self._try_fetch(kw, options) for kw in options.to_list()])
+        semaphore = asyncio.Semaphore(max_concurrent)  # 最多 3 个并发
+    
+        async def bounded_fetch(kw):
+            async with semaphore:
+                return await self._try_fetch(kw, options)
+            
+        lists = await asyncio.gather(*[bounded_fetch(kw) for kw in options.to_list()])
         return list(chain.from_iterable(lists))
 
     # ── 数据源名称 ─────────────────────────────────────────────

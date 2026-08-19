@@ -118,7 +118,6 @@ class OpenAIProvider:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 timeout=_CHAT_TIMEOUT,  # SDK 默认 600s，挂起调用会阻塞评分线程数分钟
-                max_retries=1,  # SDK 内只重试一次，其余重试交给 PaperScorer 的降级逻辑
             )
             return resp.choices[0].message.content
         except Exception as e:
